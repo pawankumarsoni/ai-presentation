@@ -266,18 +266,25 @@ export function PresentationBuilder() {
       <div className="body">
         <Filmstrip
           slides={s.deck.slides}
-          current={slide.id}
+          current={slide?.id || ''}
           onSelect={s.setCurrentSlide}
           onReorder={s.reorderSlides}
           onAdd={() => s.addSlide()}
-          onAddAfter={() => {
-            const i = s.deck.slides.findIndex((x) => x.id === slide.id);
-            s.addSlide(i + 1);
-            // current slide stays until user clicks; that's ok
-          }}
           onDuplicate={s.duplicateSlide}
           onDelete={s.deleteSlide}
-          onRename={s.renameSlide}
+          onDropElement={(slideId) => {
+            const elementId = s.selectedElementIds[0];
+
+            if (!elementId || !slide) return;
+
+            s.moveElement(
+              slide.id,
+              slideId,
+              elementId,
+              120,
+              120
+            );
+          }}
         />
 
         <Canvas

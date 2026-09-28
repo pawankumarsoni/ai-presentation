@@ -19,3 +19,25 @@
 .inspector-actions button{border:1px solid #dddfe6;border-radius:6px;padding:6px 10px;background:#fff}
 .inspector-error{color:#b42318;font-size:11px;margin-top:8px}
 .text-el[contenteditable='true']{outline:1px solid #635bff;background:#fff}
+.element-drop-target {
+    outline: 3px solid #6d5dfc;
+    outline-offset: 4px;
+    transform: scale(1.02);
+  }
+  
+  .thumb-wrap {
+    transition:
+      outline 120ms ease,
+      transform 120ms ease,
+      background 120ms ease;
+  }
+  
+  .element {
+    touch-action: none;
+    user-select: none;
+    cursor: grab;
+  }
+  
+  .element:active {
+    cursor: grabbing;
+  }
