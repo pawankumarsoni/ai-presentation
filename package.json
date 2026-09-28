@@ -2,18 +2,42 @@
   "name": "ai-presentation-builder",
   "version": "1.0.0",
   "private": true,
-  "scripts": {"dev":"next dev","build":"next build","start":"next start","lint":"next lint"},
-  "dependencies": {
-    "@dnd-kit/core":"^6.3.1",
-    "@dnd-kit/sortable":"^10.0.0",
-    "@dnd-kit/utilities":"^3.2.2",
-    "lucide-react":"^0.468.0",
-    "next":"^15.5.0",
-    "openai":"^5.20.0",
-    "react":"^19.1.1",
-    "react-dom":"^19.1.1",
-    "recharts":"^3.2.1",
-    "zustand":"^5.0.8"
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run format:check && npm run lint && npm run typecheck"
   },
-  "devDependencies":{"@types/node":"^22.15.0","@types/react":"^19.1.10","@types/react-dom":"^19.1.7","typescript":"^5.8.3"}
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@google/genai": "^2.24.0",
+    "lucide-react": "^0.468.0",
+    "next": "^15.5.0",
+    "openai": "^5.20.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "recharts": "^3.2.1",
+    "zustand": "^5.0.8"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.7",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@typescript-eslint/eslint-plugin": "^8.70.1",
+    "@typescript-eslint/parser": "^8.70.1",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^15.5.0",
+    "eslint-config-prettier": "^10.1.8",
+    "prettier": "^3.9.9",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.70.1"
+  }
 }

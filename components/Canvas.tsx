@@ -87,7 +87,7 @@ export function Canvas({
         setGuides(snapped.guides);
         setDropCopy(ev.altKey);
         onMoveGroup(
-          moving.map((m) => {
+          moving.map((m: DeckElement) => {
             const box = clampBox(m.x + snapped.dx, m.y + snapped.dy, m.width, m.height);
             return { id: m.id, x: box.x, y: box.y };
           }),
