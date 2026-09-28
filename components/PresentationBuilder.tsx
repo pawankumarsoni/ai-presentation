@@ -6,7 +6,8 @@ import { Canvas } from './Canvas';
 import { Filmstrip } from './Filmstrip';
 import { Chat } from './Chat';
 import { Inspector } from './Inspector';
-import { SlidePreview } from './SlidePreview';
+// import { SlidePreview } from './SlidePreview';
+import { PrintDeck } from './PrintDeck';
 import {
   DeckElement,
   makeChart,
@@ -375,11 +376,7 @@ export function PresentationBuilder() {
         <Chat messages={s.chat} onSend={ai} busy={busy} />
       </div>
 
-      <div className="print-deck">
-        {s.deck.slides.map((sl) => (
-          <SlidePreview key={sl.id} slide={sl} />
-        ))}
-      </div>
+      <PrintDeck deck={s.deck} />
     </div>
   );
 }

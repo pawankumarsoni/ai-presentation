@@ -41,3 +41,43 @@
   .element:active {
     cursor: grabbing;
   }
+
+  .print-deck {
+    display: none;
+  }
+  
+  @media print {
+    body * {
+      visibility: hidden !important;
+    }
+  
+    .print-deck,
+    .print-deck * {
+      visibility: visible !important;
+    }
+  
+    .print-deck {
+      display: block !important;
+    }
+  
+    .print-slide {
+      width: 1600px;
+      height: 900px;
+      position: relative;
+      page-break-after: always;
+      break-after: page;
+      overflow: hidden;
+    }
+  
+    .print-canvas {
+      width: 1600px;
+      height: 900px;
+      position: relative;
+      overflow: hidden;
+    }
+  
+    @page {
+      size: 16in 9in;
+      margin: 0;
+    }
+  }
