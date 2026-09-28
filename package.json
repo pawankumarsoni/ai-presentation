@@ -1,0 +1,19 @@
+{
+  "name": "ai-presentation-builder",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {"dev":"next dev","build":"next build","start":"next start","lint":"next lint"},
+  "dependencies": {
+    "@dnd-kit/core":"^6.3.1",
+    "@dnd-kit/sortable":"^10.0.0",
+    "@dnd-kit/utilities":"^3.2.2",
+    "lucide-react":"^0.468.0",
+    "next":"^15.5.0",
+    "openai":"^5.20.0",
+    "react":"^19.1.1",
+    "react-dom":"^19.1.1",
+    "recharts":"^3.2.1",
+    "zustand":"^5.0.8"
+  },
+  "devDependencies":{"@types/node":"^22.15.0","@types/react":"^19.1.10","@types/react-dom":"^19.1.7","typescript":"^5.8.3"}
+}
