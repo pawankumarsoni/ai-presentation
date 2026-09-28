@@ -147,6 +147,18 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
 
     const deck: Deck = body.deck;
+
+    if (!deck) {
+      return Response.json(
+        {
+          error: 'Deck is required',
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
     const prompt: string = body.prompt;
     const mode: "generate" | "edit" = body.mode || "edit";
 
@@ -154,13 +166,6 @@ export async function POST(req: NextRequest) {
       role: "user" | "assistant";
       text: string;
     }[] = body.history || [];
-
-    if (!deck) {
-      return Response.json(
-        { error: "Deck is required." },
-        { status: 400 },
-      );
-    }
 
     if (!prompt) {
       return Response.json(
@@ -186,8 +191,11 @@ export async function POST(req: NextRequest) {
         try {
           const client = getClient();
 
-          const model =
-            process.env.GEMINI_MODEL || "gemini-2.5-flash";
+          const preferredModel =
+            process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+          const models = Array.from(
+            new Set([preferredModel, "gemini-2.5-flash-lite"]),
+          );
 
           const functionDeclarations = normalizeGeminiTools(
             tools as any[],
@@ -269,11 +277,26 @@ ${
               };
             }
 
-            const response = await client.models.generateContent({
-              model,
-              contents,
-              config,
-            });
+            let response: any;
+            let lastError: any;
+
+            for (const model of models) {
+              try {
+                response = await client.models.generateContent({ model, contents, config });
+                break;
+              } catch (error: any) {
+                lastError = error;
+                const message = String(error?.message || error?.error?.message || '').toLowerCase();
+                const unavailable =
+                  message.includes('503') ||
+                  message.includes('unavailable') ||
+                  message.includes('high demand') ||
+                  message.includes('resource exhausted');
+                if (!unavailable) throw error;
+              }
+            }
+
+            if (!response) throw lastError || new Error('Gemini returned no response.');
 
             const candidate = response.candidates?.[0];
 

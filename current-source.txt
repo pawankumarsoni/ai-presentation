@@ -1,0 +1,4225 @@
+'use client';
+
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useDeckStore } from '@/lib/store';
+import { Canvas } from './Canvas';
+import { Filmstrip } from './Filmstrip';
+import { Chat } from './Chat';
+import { Inspector } from './Inspector';
+import { SlidePreview } from './SlidePreview';
+import {
+  DeckElement,
+  makeChart,
+  makeImage,
+  makeShape,
+  makeTable,
+  makeText,
+} from '@/types/deck';
+import { Undo2, Redo2, Download, Type, ImageIcon, BarChart3, Table2, Square } from 'lucide-react';
+
+function isGeneratePrompt(prompt: string, userTurns: number) {
+  if (userTurns === 0) return true;
+  return /\b(create|generate|make|build)\b.*\b(deck|presentation|slides?)\b/i.test(prompt);
+}
+
+async function readSse(
+  res: Response,
+  onEvent: (data: any) => void,
+) {
+  if (!res.body) {
+    const json = await res.json();
+    onEvent({ type: json.error ? 'error' : 'done', ...json });
+    return;
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const parts = buf.split('\n\n');
+    buf = parts.pop() || '';
+    for (const part of parts) {
+      const line = part.split('\n').find((l) => l.startsWith('data: '));
+      if (!line) continue;
+      try {
+        onEvent(JSON.parse(line.slice(6)));
+      } catch {
+        /* ignore malformed chunk */
+      }
+    }
+  }
+}
+
+export function PresentationBuilder() {
+  const s = useDeckStore();
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const slide =
+    s.deck.slides.find((x) => x.id === s.currentSlideId) || s.deck.slides[0];
+
+  useEffect(() => {
+    if (!s.currentSlideId && slide) s.setCurrentSlide(slide.id);
+  }, [s.currentSlideId, slide, s.setCurrentSlide]);
+
+  const selected = useMemo(
+    () =>
+      slide?.elementIds
+        .map((id) => slide.elements[id])
+        .filter((e) => e && s.selectedElementIds.includes(e.id)) || [],
+    [slide, s.selectedElementIds],
+  );
+
+  useEffect(() => {
+    const onKey = (ev: KeyboardEvent) => {
+      const t = ev.target as HTMLElement;
+      const typing = t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable;
+      if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'z') {
+        ev.preventDefault();
+        if (ev.shiftKey) s.redo();
+        else s.undo();
+        return;
+      }
+      if ((ev.metaKey || ev.ctrlKey) && ev.key.toLowerCase() === 'd' && slide) {
+        ev.preventDefault();
+        s.duplicateElements(slide.id, s.selectedElementIds);
+        return;
+      }
+      if (typing) return;
+      if ((ev.key === 'Delete' || ev.key === 'Backspace') && slide && s.selectedElementIds.length) {
+        ev.preventDefault();
+        s.deleteElements(slide.id, s.selectedElementIds);
+      }
+      if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft') {
+        const i = s.deck.slides.findIndex((x) => x.id === slide?.id);
+        const next = ev.key === 'ArrowRight' ? i + 1 : i - 1;
+        if (s.deck.slides[next]) s.setCurrentSlide(s.deck.slides[next].id);
+      }
+      if (ev.key === ']' && slide && s.selectedElementIds[0]) s.bringForward(slide.id, s.selectedElementIds[0]);
+      if (ev.key === '[' && slide && s.selectedElementIds[0]) s.sendBackward(slide.id, s.selectedElementIds[0]);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [s, slide]);
+
+  const ai = async (prompt: string) => {
+    setBusy(true);
+
+    try {
+      // Always get the latest deck at the moment AI is called.
+      const currentDeck = useDeckStore.getState().deck;
+
+      const mode =
+        currentDeck.slides.length > 0
+          ? 'edit'
+          : 'generate';
+
+      const r = await fetch('/api/ai', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          deck: currentDeck,
+          prompt,
+          mode,
+        }),
+      });
+
+      // keep your existing response handling...
+    } catch (e: any) {
+      s.addChat({
+        role: 'assistant',
+        text: `AI error: ${e.message}`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const patch = (e: DeckElement, p: Partial<DeckElement>) =>
+    s.updateElement(slide.id, e.id, p);
+
+  const addText = () =>
+    s.addElement(slide.id, makeText('Double-click to edit', 180, 180, 520, 120, slide.elementIds.length + 1));
+
+  const addChart = () =>
+    s.addElement(
+      slide.id,
+      makeChart(
+        {
+          type: 'bar',
+          title: 'New chart',
+          categories: ['Q1', 'Q2', 'Q3', 'Q4'],
+          series: [{ name: 'Value', data: [12, 18, 24, 30] }],
+        },
+        850,
+        220,
+        620,
+        430,
+        slide.elementIds.length + 1,
+      ),
+    );
+
+  const addTable = () =>
+    s.addElement(
+      slide.id,
+      makeTable(
+        {
+          headers: ['Item', 'Owner', 'Status'],
+          rows: [
+            ['New item', 'Team', 'Draft'],
+            ['Another', 'Team', 'Planned'],
+          ],
+        },
+        160,
+        280,
+        900,
+        280,
+        slide.elementIds.length + 1,
+      ),
+    );
+
+  const addShape = () => s.addElement(slide.id, makeShape('#eceaff', 240, 500, 360, 180, slide.elementIds.length + 1));
+
+  const addImageFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      s.addElement(
+        slide.id,
+        makeImage(String(reader.result), 200, 160, 720, 400, slide.elementIds.length + 1),
+      );
+    };
+    reader.readAsDataURL(file);
+  };
+
+  if (!slide) {
+    return (
+      <div className="empty-deck">
+        <h2>No slides yet</h2>
+        <button onClick={() => s.addSlide()}>Add a blank slide</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="app">
+      <header className="topbar">
+        <div className="brand">
+          <div className="logo">D</div>
+          <div>
+            <b>Decksmith</b>
+            <span>AI presentation builder</span>
+          </div>
+        </div>
+
+        <div className="deck-title">{s.deck.title}</div>
+
+        <div className="top-actions">
+          <button onClick={s.undo} disabled={!s.history.length} title="Undo">
+            <Undo2 size={16} />
+          </button>
+          <button onClick={s.redo} disabled={!s.future.length} title="Redo">
+            <Redo2 size={16} />
+          </button>
+          <button onClick={addText} title="Text">
+            <Type size={16} />
+          </button>
+          <button onClick={() => fileRef.current?.click()} title="Image">
+            <ImageIcon size={16} />
+          </button>
+          <button onClick={addChart} title="Chart">
+            <BarChart3 size={16} />
+          </button>
+          <button onClick={addTable} title="Table">
+            <Table2 size={16} />
+          </button>
+          <button onClick={addShape} title="Shape">
+            <Square size={16} />
+          </button>
+          <button onClick={() => window.print()} title="Print / PDF">
+            <Download size={16} /> Export
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) addImageFile(file);
+              e.target.value = '';
+            }}
+          />
+        </div>
+      </header>
+
+      <div className="body">
+        <Filmstrip
+          slides={s.deck.slides}
+          current={slide?.id || ''}
+          onSelect={s.setCurrentSlide}
+          onReorder={s.reorderSlides}
+          onAdd={() => s.addSlide()}
+          onDuplicate={s.duplicateSlide}
+          onDelete={s.deleteSlide}
+          onDropElement={(slideId) => {
+            const elementId = s.selectedElementIds[0];
+
+            if (!elementId || !slide) return;
+
+            s.moveElement(
+              slide.id,
+              slideId,
+              elementId,
+              120,
+              120
+            );
+          }}
+        />
+
+        <Canvas
+          slide={slide}
+          selected={s.selectedElementIds}
+          onSelectIds={s.select}
+          onMoveGroup={(patches, silent) =>
+            s.updateElements(
+              slide.id,
+              patches.map((p) => ({ id: p.id, patch: { x: p.x, y: p.y } })),
+              { recordHistory: !silent },
+            )
+          }
+          onResize={(id, w, h, silent) => s.updateElement(slide.id, id, { width: w, height: h }, { recordHistory: !silent })}
+          onDelete={(ids) => s.deleteElements(slide.id, ids)}
+          onDuplicate={(ids) => s.duplicateElements(slide.id, ids)}
+          onBringForward={(id) => s.bringForward(slide.id, id)}
+          onSendBackward={(id) => s.sendBackward(slide.id, id)}
+          onEditText={(id, t) =>
+            s.updateElement(slide.id, id, {
+              payload: {
+                ...slide.elements[id].payload,
+                richText: { ...slide.elements[id].payload.richText, text: t },
+              },
+            })
+          }
+          onEditTableCell={(id, row, col, value) => {
+            const table = slide.elements[id]?.payload.table;
+            if (!table) return;
+            const rows = table.rows.map((r, i) => (i === row ? r.map((c, j) => (j === col ? value : c)) : r));
+            s.updateElement(slide.id, id, { payload: { ...slide.elements[id].payload, table: { ...table, rows } } });
+          }}
+          onCrossSlide={(id, sid, x, y, copy) => s.moveElement(slide.id, sid, id, x, y, { copy })}
+          onAddText={addText}
+          beginGesture={s.beginGesture}
+          endGesture={s.endGesture}
+          cancelGesture={s.cancelGesture}
+        />
+
+        <Inspector e={selected[0]} onPatch={(p) => selected[0] && patch(selected[0], p)} />
+
+        <Chat messages={s.chat} onSend={ai} busy={busy} />
+      </div>
+
+      <div className="print-deck">
+        {s.deck.slides.map((sl) => (
+          <SlidePreview key={sl.id} slide={sl} />
+        ))}
+      </div>
+    </div>
+  );
+}
+'use client';
+
+import { useRef } from 'react';
+import { DeckElement, Slide, W, H } from '@/types/deck';
+import { ChartView } from './ChartView';
+import { Trash2 } from 'lucide-react';
+
+type Props = {
+  e: DeckElement;
+  slide: Slide;
+  selected: boolean;
+  editing: boolean;
+
+  onSelect: (e: DeckElement, add: boolean) => void;
+
+  onDragStart: (
+    item: DeckElement,
+    ev: React.PointerEvent<HTMLDivElement>
+  ) => void;
+
+  onResizeStart: (
+    item: DeckElement,
+    ev: React.PointerEvent<HTMLDivElement>
+  ) => void;
+
+  onDelete: (id: string) => void;
+
+  onDuplicate: (id: string) => void;
+
+  onBringForward: (id: string) => void;
+
+  onSendBackward: (id: string) => void;
+
+  onEditText: (id: string, text: string) => void;
+
+  onEditTableCell: (
+    id: string,
+    row: number,
+    column: number,
+    text: string
+  ) => void;
+
+  onStartEdit: (id: string) => void;
+
+  onEndEdit: () => void;
+};
+
+export function Element({
+  e,
+  slide,
+  selected,
+  editing,
+  onSelect,
+  onDragStart,
+  onResizeStart,
+  onDelete,
+  onDuplicate,
+  onBringForward,
+  onSendBackward,
+  onEditText,
+  onEditTableCell,
+  onStartEdit,
+  onEndEdit,
+}: Props) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  const handlePointerDown = (
+    ev: React.PointerEvent<HTMLDivElement>
+  ) => {
+    if (e.locked) return;
+
+    ev.stopPropagation();
+
+    onSelect(e, ev.shiftKey);
+
+    onDragStart(e, ev);
+  };
+
+  const handleDoubleClick = () => {
+    if (e.locked) return;
+
+    if (e.type === 'text') {
+      onStartEdit(e.id);
+    }
+  };
+
+  const handleTextBlur = (
+    ev: React.FocusEvent<HTMLDivElement>
+  ) => {
+    const text = ev.currentTarget.innerText;
+
+    onEditText(e.id, text);
+    onEndEdit();
+  };
+
+  const handleTableCellDoubleClick = (
+    row: number,
+    column: number
+  ) => {
+    if (e.locked) return;
+
+    const currentValue =
+      e.payload.table?.rows?.[row]?.[column] ?? '';
+
+    const value = window.prompt(
+      'Edit table cell',
+      currentValue
+    );
+
+    if (value !== null) {
+      onEditTableCell(
+        e.id,
+        row,
+        column,
+        value
+      );
+    }
+  };
+
+  const style: React.CSSProperties = {
+    left: `${(e.x / W) * 100}%`,
+    top: `${(e.y / H) * 100}%`,
+    width: `${(e.width / W) * 100}%`,
+    height: `${(e.height / H) * 100}%`,
+    zIndex: e.zIndex,
+    transform: `rotate(${e.rotation || 0}deg)`,
+  };
+
+  return (
+    <div
+      ref={ref}
+      className={[
+        'element',
+        selected ? 'selected' : '',
+        editing ? 'editing' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+      style={style}
+      onPointerDown={handlePointerDown}
+      onDoubleClick={handleDoubleClick}
+    >
+      {/* TEXT */}
+      {e.type === 'text' && (
+        <div
+          className="text-el"
+          contentEditable={editing}
+          suppressContentEditableWarning
+          onBlur={
+            editing
+              ? handleTextBlur
+              : undefined
+          }
+          onPointerDown={(ev) => {
+            if (editing) {
+              ev.stopPropagation();
+            }
+          }}
+        >
+          {e.payload.richText?.text}
+        </div>
+      )}
+
+      {/* IMAGE */}
+      {e.type === 'image' && (
+        <img
+          src={
+            e.payload.src ||
+            'https://images.unsplash.com/photo-1497366754035-f200968a6e72?auto=format&fit=crop&w=1000&q=80'
+          }
+          alt={e.payload.alt || ''}
+          draggable={false}
+        />
+      )}
+
+      {/* CHART */}
+      {e.type === 'chart' && (
+        <>
+          {e.payload.chart?.title && (
+            <div className="chart-title">
+              {e.payload.chart.title}
+            </div>
+          )}
+
+          {e.payload.chart && (
+            <ChartView
+              spec={e.payload.chart}
+            />
+          )}
+        </>
+      )}
+
+      {/* TABLE */}
+      {e.type === 'table' && (
+        <table>
+          <thead>
+            <tr>
+              {e.payload.table?.headers.map(
+                (header, index) => (
+                  <th
+                    key={`${header}-${index}`}
+                  >
+                    {header}
+                  </th>
+                )
+              )}
+            </tr>
+          </thead>
+
+          <tbody>
+            {e.payload.table?.rows.map(
+              (row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {row.map(
+                    (cell, columnIndex) => (
+                      <td
+                        key={`${rowIndex}-${columnIndex}`}
+                        onDoubleClick={(ev) => {
+                          ev.stopPropagation();
+
+                          handleTableCellDoubleClick(
+                            rowIndex,
+                            columnIndex
+                          );
+                        }}
+                      >
+                        {cell}
+                      </td>
+                    )
+                  )}
+                </tr>
+              )
+            )}
+          </tbody>
+        </table>
+      )}
+
+      {/* SHAPE */}
+      {e.type === 'shape' && (
+        <div
+          className="shape"
+          style={{
+            background:
+              e.payload.fill || '#e9e7ff',
+            borderRadius:
+              e.payload.radius || 18,
+          }}
+        />
+      )}
+
+      {/* SELECTION CONTROLS */}
+      {selected && (
+        <>
+          {/* DELETE */}
+          <button
+            type="button"
+            className="delete-handle"
+            onPointerDown={(ev) => {
+              ev.stopPropagation();
+            }}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onDelete(e.id);
+            }}
+          >
+            <Trash2 size={13} />
+          </button>
+
+          {/* DUPLICATE */}
+          <button
+            type="button"
+            className="duplicate-handle"
+            onPointerDown={(ev) => {
+              ev.stopPropagation();
+            }}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onDuplicate(e.id);
+            }}
+          >
+            +
+          </button>
+
+          {/* BRING FORWARD */}
+          <button
+            type="button"
+            className="bring-forward-handle"
+            onPointerDown={(ev) => {
+              ev.stopPropagation();
+            }}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onBringForward(e.id);
+            }}
+          >
+            ↑
+          </button>
+
+          {/* SEND BACKWARD */}
+          <button
+            type="button"
+            className="send-backward-handle"
+            onPointerDown={(ev) => {
+              ev.stopPropagation();
+            }}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              onSendBackward(e.id);
+            }}
+          >
+            ↓
+          </button>
+
+          {/* RESIZE */}
+          <div
+            className="resize-handle"
+            onPointerDown={(ev) => {
+              if (e.locked) return;
+
+              ev.stopPropagation();
+
+              onResizeStart(e, ev);
+            }}
+          />
+        </>
+      )}
+    </div>
+  );
+}'use client';
+
+import { useState } from 'react';
+import { Slide } from '@/types/deck';
+import { Plus, Copy, Trash2 } from 'lucide-react';
+
+type Props = {
+  slides: Slide[];
+  current: string;
+  onSelect: (id: string) => void;
+  onReorder: (from: number, to: number) => void;
+  onAdd: () => void;
+  onDuplicate: (id: string) => void;
+  onDelete: (id: string) => void;
+  onDropElement: (id: string) => void;
+};
+
+export function Filmstrip({
+  slides,
+  current,
+  onSelect,
+  onReorder,
+  onAdd,
+  onDuplicate,
+  onDelete,
+  onDropElement,
+}: Props) {
+  const [draggedSlide, setDraggedSlide] = useState<number | null>(
+    null
+  );
+
+  const [elementDropTarget, setElementDropTarget] = useState<
+    string | null
+  >(null);
+
+  return (
+    <aside className="filmstrip">
+      <div className="film-head">
+        <span>Slides</span>
+
+        <button onClick={onAdd}>
+          <Plus size={16} />
+        </button>
+      </div>
+
+      <div className="slides-list">
+        {slides.map((s, i) => {
+          const isElementDropTarget =
+            elementDropTarget === s.id;
+
+          return (
+            <div
+              key={s.id}
+              data-slide-drop={s.id}
+              draggable
+              onDragStart={() => setDraggedSlide(i)}
+              onDragOver={(event) => {
+                event.preventDefault();
+                setElementDropTarget(s.id);
+              }}
+              onDragLeave={() => {
+                setElementDropTarget(null);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+
+                /*
+                 * Element cross-slide drop is handled by
+                 * Element.tsx pointer events.
+                 *
+                 * This native drop handler is retained so
+                 * the thumbnail remains a valid drop target.
+                 */
+                setElementDropTarget(null);
+
+                if (
+                  draggedSlide !== null &&
+                  draggedSlide !== i
+                ) {
+                  onReorder(draggedSlide, i);
+                }
+
+                setDraggedSlide(null);
+              }}
+              className={`thumb-wrap ${
+                current === s.id ? 'active' : ''
+              } ${
+                isElementDropTarget
+                  ? 'element-drop-target'
+                  : ''
+              }`}
+              onClick={() => onSelect(s.id)}
+            >
+              <div className="thumb">
+                <div className="thumb-title">
+                  {s.title}
+                </div>
+
+                {s.elementIds.slice(0, 4).map((id) => (
+                  <div
+                    key={id}
+                    className={`thumb-el ${
+                      s.elements[id]?.type
+                    }`}
+                  >
+                    {s.elements[id]?.type === 'text'
+                      ? s.elements[
+                          id
+                        ].payload.richText?.text?.slice(
+                          0,
+                          45
+                        )
+                      : s.elements[id]?.type}
+                  </div>
+                ))}
+              </div>
+
+              <div className="thumb-actions">
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDuplicate(s.id);
+                  }}
+                >
+                  <Copy size={12} />
+                </button>
+
+                <button
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDelete(s.id);
+                  }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="drop-hint">
+        Drag a chart, table, text or other element onto
+        another slide thumbnail to move it.
+      </div>
+    </aside>
+  );
+}'use client';
+
+import { useEffect, useRef, useState } from 'react';
+import { Slide, DeckElement, W, H } from '@/types/deck';
+import { Element } from './Element';
+import { Guide, snapAndGuides } from '@/lib/geometry';
+import { clampBox } from '@/lib/geometry';
+
+type Marquee = { x: number; y: number; w: number; h: number };
+
+export function Canvas({
+  slide,
+  selected,
+  onSelectIds,
+  onMoveGroup,
+  onResize,
+  onDelete,
+  onDuplicate,
+  onBringForward,
+  onSendBackward,
+  onEditText,
+  onEditTableCell,
+  onCrossSlide,
+  onAddText,
+  beginGesture,
+  endGesture,
+  cancelGesture,
+}: {
+  slide: Slide;
+  selected: string[];
+  onSelectIds: (ids: string[], add?: boolean) => void;
+  onMoveGroup: (patches: Array<{ id: string; x: number; y: number }>, silent: boolean) => void;
+  onResize: (id: string, w: number, h: number, silent: boolean) => void;
+  onDelete: (ids: string[]) => void;
+  onDuplicate: (ids: string[]) => void;
+  onBringForward: (id: string) => void;
+  onSendBackward: (id: string) => void;
+  onEditText: (id: string, t: string) => void;
+  onEditTableCell: (id: string, row: number, col: number, value: string) => void;
+  onCrossSlide: (id: string, sid: string, x: number, y: number, copy: boolean) => void;
+  onAddText: () => void;
+  beginGesture: () => void;
+  endGesture: () => void;
+  cancelGesture: () => void;
+}) {
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const drag = useRef<any>(null);
+  const [guides, setGuides] = useState<Guide[]>([]);
+  const [hoverSlide, setHoverSlide] = useState<string | null>(null);
+  const [marquee, setMarquee] = useState<Marquee | null>(null);
+  const marqueeRef = useRef<Marquee | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [dropCopy, setDropCopy] = useState(false);
+
+  const artboardPoint = (clientX: number, clientY: number) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return { x: 0, y: 0, scale: 1 };
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: ((clientX - r.left) / r.width) * W,
+      y: ((clientY - r.top) / r.height) * H,
+      scale: r.width / W,
+    };
+  };
+
+  useEffect(() => {
+    const move = (ev: PointerEvent) => {
+      if (drag.current?.type === 'move') {
+        const { scale } = artboardPoint(ev.clientX, ev.clientY);
+        const rawDx = (ev.clientX - drag.current.sx) / scale;
+        const rawDy = (ev.clientY - drag.current.sy) / scale;
+        if (!drag.current.started) {
+          if (Math.hypot(rawDx, rawDy) < 3) return;
+          drag.current.started = true;
+          beginGesture();
+        }
+        const moving = drag.current.ids.map((id: string) => {
+          const origin = drag.current.origins[id];
+          const el = slide.elements[id];
+          return { id, x: origin.x + rawDx, y: origin.y + rawDy, width: el.width, height: el.height };
+        });
+        const others = slide.elementIds
+          .filter((id) => !drag.current.ids.includes(id))
+          .map((id) => slide.elements[id])
+          .filter(Boolean);
+        const snapped = snapAndGuides(moving, others);
+        setGuides(snapped.guides);
+        setDropCopy(ev.altKey);
+        onMoveGroup(
+          moving.map((m: DeckElement) => {
+            const box = clampBox(m.x + snapped.dx, m.y + snapped.dy, m.width, m.height);
+            return { id: m.id, x: box.x, y: box.y };
+          }),
+          true,
+        );
+
+        const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-slide-drop]') as HTMLElement | null;
+        const hid = target?.dataset.slideDrop || null;
+        setHoverSlide(hid && hid !== slide.id ? hid : null);
+        document.querySelectorAll('[data-slide-drop]').forEach((n) => n.classList.toggle('drop-target', n === target && hid !== slide.id));
+      }
+
+      if (drag.current?.type === 'resize') {
+        const { scale } = artboardPoint(ev.clientX, ev.clientY);
+        if (!drag.current.started) {
+          drag.current.started = true;
+          beginGesture();
+        }
+        const w = drag.current.w + (ev.clientX - drag.current.sx) / scale;
+        const h = drag.current.h + (ev.clientY - drag.current.sy) / scale;
+        const box = clampBox(drag.current.x, drag.current.y, w, h);
+        onResize(drag.current.id, box.width, box.height, true);
+      }
+
+      if (drag.current?.type === 'marquee') {
+        const p = artboardPoint(ev.clientX, ev.clientY);
+        const box = {
+          x: Math.min(drag.current.ax, p.x),
+          y: Math.min(drag.current.ay, p.y),
+          w: Math.abs(p.x - drag.current.ax),
+          h: Math.abs(p.y - drag.current.ay),
+        };
+        marqueeRef.current = box;
+        setMarquee(box);
+      }
+    };
+
+    const up = (ev: PointerEvent) => {
+      if (drag.current?.type === 'move') {
+        const target = document.elementFromPoint(ev.clientX, ev.clientY)?.closest('[data-slide-drop]') as HTMLElement | null;
+        const dest = target?.dataset.slideDrop;
+        if (drag.current.started && dest && dest !== slide.id) {
+          const ids = [...drag.current.ids];
+          if (ev.altKey) {
+            cancelGesture();
+            beginGesture();
+            for (const id of ids) onCrossSlide(id, dest, 120, 120, true);
+            endGesture();
+          } else {
+            for (const id of ids) onCrossSlide(id, dest, 120, 120, false);
+            endGesture();
+          }
+        } else if (drag.current.started) {
+          endGesture();
+        }
+        setGuides([]);
+        setHoverSlide(null);
+        setDropCopy(false);
+        document.querySelectorAll('[data-slide-drop]').forEach((n) => n.classList.remove('drop-target'));
+      }
+      if (drag.current?.type === 'resize' && drag.current.started) endGesture();
+      const box = marqueeRef.current;
+      if (drag.current?.type === 'marquee' && box) {
+        const hits = slide.elementIds.filter((id) => {
+          const el = slide.elements[id];
+          return (
+            el &&
+            el.x < box.x + box.w &&
+            el.x + el.width > box.x &&
+            el.y < box.y + box.h &&
+            el.y + el.height > box.y
+          );
+        });
+        onSelectIds(hits);
+        marqueeRef.current = null;
+        setMarquee(null);
+      }
+      drag.current = null;
+    };
+
+    const key = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape' && drag.current) {
+        if (drag.current.started) cancelGesture();
+        drag.current = null;
+        setGuides([]);
+        setMarquee(null);
+        setHoverSlide(null);
+      }
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    window.addEventListener('keydown', key);
+    return () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('keydown', key);
+    };
+  }, [slide, marquee, beginGesture, endGesture, cancelGesture, onMoveGroup, onResize, onCrossSlide, onSelectIds]);
+
+  return (
+    <main className="stage">
+      <div className="canvas-toolbar">
+        <span>{slide.title}</span>
+        <button onClick={onAddText}>+ Text</button>
+      </div>
+
+      <div className="canvas-shell">
+        <div
+          ref={canvasRef}
+          data-canvas
+          className="canvas"
+          style={{ background: slide.background }}
+          onPointerDown={(ev) => {
+            if (ev.target !== canvasRef.current) return;
+            setEditingId(null);
+            onSelectIds([]);
+            const p = artboardPoint(ev.clientX, ev.clientY);
+            drag.current = { type: 'marquee', ax: p.x, ay: p.y };
+          }}
+        >
+          {slide.elementIds.map((id) => {
+            const el = slide.elements[id];
+            if (!el) return null;
+            return (
+              <Element
+                key={id}
+                e={el}
+                slide={slide}
+                selected={selected.includes(id)}
+                editing={editingId === id}
+                onSelect={(item, add) => {
+                  if (add) onSelectIds([item.id], true);
+                  else if (!selected.includes(item.id)) onSelectIds([item.id]);
+                }}
+                onDragStart={(item, ev) => {
+                  const ids = ev.shiftKey
+                    ? [...new Set([...selected, item.id])]
+                    : selected.includes(item.id)
+                      ? selected
+                      : [item.id];
+                  const origins: Record<string, { x: number; y: number }> = {};
+                  ids.forEach((id) => {
+                    const n = slide.elements[id];
+                    if (n) origins[id] = { x: n.x, y: n.y };
+                  });
+                  drag.current = {
+                    type: 'move',
+                    ids,
+                    origins,
+                    sx: ev.clientX,
+                    sy: ev.clientY,
+                    started: false,
+                  };
+                }}
+                onResizeStart={(item, ev) => {
+                  drag.current = {
+                    type: 'resize',
+                    id: item.id,
+                    sx: ev.clientX,
+                    sy: ev.clientY,
+                    w: item.width,
+                    h: item.height,
+                    x: item.x,
+                    y: item.y,
+                    started: false,
+                  };
+                }}
+                onDelete={(id) => onDelete([id])}
+                onDuplicate={(id) => onDuplicate([id])}
+                onBringForward={onBringForward}
+                onSendBackward={onSendBackward}
+                onEditText={onEditText}
+                onEditTableCell={onEditTableCell}
+                onStartEdit={setEditingId}
+                onEndEdit={() => setEditingId(null)}
+              />
+            );
+          })}
+
+          {guides.map((g, i) => (
+            <div
+              key={`${g.axis}-${i}`}
+              className={`guide ${g.axis}`}
+              style={g.axis === 'x' ? { left: `${(g.pos / W) * 100}%` } : { top: `${(g.pos / H) * 100}%` }}
+            />
+          ))}
+
+          {marquee && (
+            <div
+              className="marquee"
+              style={{
+                left: `${(marquee.x / W) * 100}%`,
+                top: `${(marquee.y / H) * 100}%`,
+                width: `${(marquee.w / W) * 100}%`,
+                height: `${(marquee.h / H) * 100}%`,
+              }}
+            />
+          )}
+        </div>
+      </div>
+
+      <div className="canvas-status">
+        1600 × 900 · 16:9 · {slide.elementIds.length} elements
+        {hoverSlide ? (dropCopy ? ' · copying to another slide' : ' · moving to another slide') : ' · drag onto a thumbnail to move · hold Alt to copy · Esc cancels'}
+      </div>
+    </main>
+  );
+}
+'use client';
+
+import { useState } from 'react';
+import { Send, Sparkles, Loader2 } from 'lucide-react';
+
+export function Chat({
+  messages,
+  onSend,
+  busy,
+}: {
+  messages: { role: 'user' | 'assistant'; text: string }[];
+  onSend: (s: string) => void;
+  busy: boolean;
+}) {
+  const [v, setV] = useState('');
+  const submit = () => {
+    if (!v.trim() || busy) return;
+    onSend(v.trim());
+    setV('');
+  };
+
+  return (
+    <aside className="chat">
+      <div className="chat-head">
+        <div>
+          <b>Deck AI</b>
+          <span>Agentic editor</span>
+        </div>
+        <Sparkles size={17} />
+      </div>
+      <div className="messages">
+        {messages.length === 0 && (
+          <div className="welcome">
+            <h3>What are we building?</h3>
+            <p>Generate a deck, rewrite a slide, add a chart, or move an element. AI mutations land on the canvas as tools complete.</p>
+            <div className="chips">
+              <button onClick={() => setV('Create a 5-slide product roadmap with a revenue chart and milestones table')}>
+                Product roadmap
+              </button>
+              <button onClick={() => setV('Make slide 2 more concise and formal')}>Refine slide 2</button>
+              <button onClick={() => setV('Add a bar chart of quarterly revenue to slide 3')}>Add chart</button>
+            </div>
+          </div>
+        )}
+        {messages.map((m, i) => (
+          <div key={i} className={`msg ${m.role}`}>
+            <div>{m.text}</div>
+          </div>
+        ))}
+        {busy && (
+          <div className="msg assistant">
+            <div>
+              <Loader2 className="spin" size={16} /> Applying tools…
+            </div>
+          </div>
+        )}
+      </div>
+      <div className="composer">
+        <textarea
+          value={v}
+          onChange={(e) => setV(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              submit();
+            }
+          }}
+          placeholder="Ask AI to change the deck…"
+        />
+        <button onClick={submit} disabled={busy || !v.trim()}>
+          <Send size={16} />
+        </button>
+      </div>
+    </aside>
+  );
+}
+'use client';
+
+import { useEffect, useState } from 'react';
+import { ChartType, DeckElement } from '@/types/deck';
+
+type Props = {
+  e?: DeckElement;
+  onPatch: (p: Partial<DeckElement>) => void;
+};
+
+export function Inspector({ e, onPatch }: Props) {
+  const [draft, setDraft] = useState<DeckElement | undefined>();
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setDraft(e ? structuredClone(e) : undefined);
+    setError('');
+  }, [e?.id]);
+
+  if (!e || !draft) {
+    return <div className="inspector empty">Select an element to inspect it.</div>;
+  }
+
+  const commit = () => {
+    if (draft.type === 'chart' && !draft.payload.chart) return;
+    if (draft.type === 'table' && !draft.payload.table) return;
+    onPatch({
+      x: draft.x,
+      y: draft.y,
+      width: draft.width,
+      height: draft.height,
+      rotation: draft.rotation,
+      payload: draft.payload,
+    });
+    setError('');
+  };
+
+  const cancel = () => {
+    setDraft(structuredClone(e));
+    setError('');
+  };
+
+  const patchDraft = (patch: Partial<DeckElement>) =>
+    setDraft((current) => (current ? { ...current, ...patch } : current));
+
+  const patchPayload = (payload: DeckElement['payload']) =>
+    setDraft((current) => (current ? { ...current, payload } : current));
+
+  const chart = draft.payload.chart;
+
+  return (
+    <div className="inspector">
+      <div className="panel-title">Inspector</div>
+
+      <label>Position</label>
+      <div className="grid2">
+        <input value={Math.round(draft.x)} onChange={(v) => patchDraft({ x: +v.target.value || 0 })} />
+        <input value={Math.round(draft.y)} onChange={(v) => patchDraft({ y: +v.target.value || 0 })} />
+        <input value={Math.round(draft.width)} onChange={(v) => patchDraft({ width: +v.target.value || 1 })} />
+        <input value={Math.round(draft.height)} onChange={(v) => patchDraft({ height: +v.target.value || 1 })} />
+      </div>
+
+      {draft.type === 'text' && (
+        <>
+          <label>Text</label>
+          <textarea
+            value={draft.payload.richText?.text || ''}
+            onChange={(v) =>
+              patchPayload({
+                ...draft.payload,
+                richText: { ...(draft.payload.richText || {}), text: v.target.value },
+              })
+            }
+          />
+        </>
+      )}
+
+      {draft.type === 'chart' && chart && (
+        <>
+          <label>Chart type</label>
+          <select
+            value={chart.type}
+            onChange={(v) =>
+              patchPayload({
+                ...draft.payload,
+                chart: { ...chart, type: v.target.value as ChartType },
+              })
+            }
+          >
+            <option value="bar">Bar</option>
+            <option value="line">Line</option>
+            <option value="pie">Pie</option>
+          </select>
+
+          <label>Title</label>
+          <input
+            value={chart.title}
+            onChange={(v) =>
+              patchPayload({
+                ...draft.payload,
+                chart: { ...chart, title: v.target.value },
+              })
+            }
+          />
+
+          <label>Categories (comma separated)</label>
+          <input
+            value={chart.categories.join(', ')}
+            onChange={(v) =>
+              patchPayload({
+                ...draft.payload,
+                chart: {
+                  ...chart,
+                  categories: v.target.value.split(',').map((item) => item.trim()).filter(Boolean),
+                },
+              })
+            }
+          />
+
+          <label>Series JSON</label>
+          <textarea
+            className="data-editor"
+            value={JSON.stringify(chart.series, null, 2)}
+            onChange={(v) => {
+              try {
+                const series = JSON.parse(v.target.value);
+                if (!Array.isArray(series)) throw new Error('Series must be an array');
+                patchPayload({ ...draft.payload, chart: { ...chart, series } });
+                setError('');
+              } catch {
+                setError('Invalid chart data. Fix the JSON before saving.');
+              }
+            }}
+          />
+        </>
+      )}
+
+      {draft.type === 'table' && draft.payload.table && (
+        <>
+          <label>Table JSON</label>
+          <textarea
+            className="data-editor"
+            value={JSON.stringify(draft.payload.table, null, 2)}
+            onChange={(v) => {
+              try {
+                const table = JSON.parse(v.target.value);
+                if (!table || !Array.isArray(table.headers) || !Array.isArray(table.rows)) {
+                  throw new Error('Invalid table');
+                }
+                patchPayload({ ...draft.payload, table });
+                setError('');
+              } catch {
+                setError('Invalid table JSON. Fix it before saving.');
+              }
+            }}
+          />
+        </>
+      )}
+
+      {error && <div className="inspector-error">{error}</div>}
+
+      <div className="inspector-actions">
+        <button onClick={cancel}>Cancel</button>
+        <button onClick={commit} disabled={!!error}>Save</button>
+      </div>
+    </div>
+  );
+}
+'use client';
+
+import {
+  ResponsiveContainer,
+  BarChart,
+  Bar,
+  LineChart,
+  Line,
+  PieChart,
+  Pie,
+  Cell,
+  CartesianGrid,
+  XAxis,
+  YAxis,
+  Tooltip,
+  Legend,
+} from 'recharts';
+import { ChartSpec } from '@/types/deck';
+
+const FALLBACK = ['#635BFF', '#22C55E', '#F59E0B', '#EF4444', '#06B6D4', '#8B5CF6'];
+
+export function ChartView({ spec }: { spec: ChartSpec }) {
+  const colors = spec.colors?.length ? spec.colors : FALLBACK;
+  const data = spec.categories.map((c, i) =>
+    Object.fromEntries([['name', c], ...spec.series.map((s) => [s.name, s.data[i] ?? 0])]),
+  );
+
+  if (spec.type === 'pie') {
+    const s = spec.series[0];
+    return (
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie data={data} dataKey={s?.name || 'value'} nameKey="name" cx="50%" cy="50%" outerRadius="68%" label>
+            {data.map((_, i) => (
+              <Cell key={i} fill={colors[i % colors.length]} />
+            ))}
+          </Pie>
+          <Tooltip />
+          <Legend />
+        </PieChart>
+      </ResponsiveContainer>
+    );
+  }
+
+  const C = spec.type === 'line' ? LineChart : BarChart;
+  return (
+    <ResponsiveContainer width="100%" height="100%">
+      <C data={data} margin={{ top: 20, right: 20, left: 0, bottom: 10 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="name" />
+        <YAxis />
+        <Tooltip />
+        <Legend />
+        {spec.series.map((series, i) =>
+          spec.type === 'line' ? (
+            <Line
+              key={series.name}
+              type="monotone"
+              dataKey={series.name}
+              stroke={colors[i % colors.length]}
+              strokeWidth={3}
+              dot={{ r: 3 }}
+            />
+          ) : (
+            <Bar key={series.name} dataKey={series.name} fill={colors[i % colors.length]} radius={[5, 5, 0, 0]} />
+          ),
+        )}
+      </C>
+    </ResponsiveContainer>
+  );
+}
+'use client';
+
+import { create } from 'zustand';
+import {
+  Deck,
+  DeckElement,
+  HistoryState,
+  W,
+  H,
+  blankSlide,
+  emptyDeck,
+  uid,
+} from '@/types/deck';
+import { clampBox, findFreePosition } from '@/lib/geometry';
+
+type ApplyOpts = {
+  recordHistory?: boolean;
+};
+
+type Store = {
+  deck: Deck;
+  currentSlideId: string;
+  selectedElementIds: string[];
+  history: HistoryState[];
+  future: HistoryState[];
+  chat: { role: 'user' | 'assistant'; text: string }[];
+  gestureActive: boolean;
+  setCurrentSlide: (id: string) => void;
+  select: (ids: string[], add?: boolean) => void;
+  apply: (fn: (d: Deck) => void, opts?: ApplyOpts) => void;
+  beginGesture: () => void;
+  endGesture: () => void;
+  cancelGesture: () => void;
+  addSlide: (index?: number) => void;
+  deleteSlide: (id: string) => void;
+  duplicateSlide: (id: string) => void;
+  reorderSlides: (from: number, to: number) => void;
+  renameSlide: (id: string, title: string) => void;
+  updateElement: (slideId: string, elementId: string, patch: Partial<DeckElement>, opts?: ApplyOpts) => void;
+  updateElements: (
+    slideId: string,
+    patches: Array<{ id: string; patch: Partial<DeckElement> }>,
+    opts?: ApplyOpts,
+  ) => void;
+  deleteElement: (slideId: string, id: string) => void;
+  deleteElements: (slideId: string, ids: string[]) => void;
+  addElement: (slideId: string, e: DeckElement) => void;
+  duplicateElement: (slideId: string, id: string) => void;
+  duplicateElements: (slideId: string, ids: string[]) => void;
+  moveElement: (
+    fromSlide: string,
+    toSlide: string,
+    id: string,
+    x?: number,
+    y?: number,
+    opts?: ApplyOpts & { copy?: boolean },
+  ) => void;
+  bringForward: (slideId: string, id: string) => void;
+  sendBackward: (slideId: string, id: string) => void;
+  undo: () => void;
+  redo: () => void;
+  addChat: (m: { role: 'user' | 'assistant'; text: string }) => void;
+  loadDeck: (d: Deck, opts?: { recordHistory?: boolean }) => void;
+};
+
+const snapshot = (s: Pick<Store, 'deck' | 'currentSlideId' | 'selectedElementIds'>): HistoryState => ({
+  deck: structuredClone(s.deck),
+  currentSlideId: s.currentSlideId,
+  selectedElementIds: [...s.selectedElementIds],
+});
+
+function pruneSelection(deck: Deck, ids: string[]) {
+  const live = new Set(deck.slides.flatMap((slide) => slide.elementIds));
+  return ids.filter((id) => live.has(id));
+}
+
+function syncZ(slide: { elementIds: string[]; elements: Record<string, DeckElement> }) {
+  slide.elementIds.forEach((id, i) => {
+    if (slide.elements[id]) slide.elements[id].zIndex = i + 1;
+  });
+}
+
+function placeOnSlide(
+  destination: { elementIds: string[]; elements: Record<string, DeckElement> },
+  element: DeckElement,
+  x: number,
+  y: number,
+  ignoreIds: string[] = [],
+) {
+  const boxed = clampBox(x, y, element.width, element.height);
+  const p = findFreePosition(destination, { ...element, width: boxed.width, height: boxed.height }, boxed.x, boxed.y, ignoreIds);
+  element.x = p.x;
+  element.y = p.y;
+  element.width = boxed.width;
+  element.height = boxed.height;
+}
+
+export const useDeckStore = create<Store>((set, get) => ({
+  deck: emptyDeck(),
+  currentSlideId: '',
+  selectedElementIds: [],
+  history: [],
+  future: [],
+  chat: [],
+  gestureActive: false,
+
+  setCurrentSlide: (id) => set({ currentSlideId: id, selectedElementIds: [] }),
+
+  select: (ids, add = false) =>
+    set((s) => ({
+      selectedElementIds: add ? [...new Set([...s.selectedElementIds, ...ids])] : ids,
+    })),
+
+  apply: (fn, opts) =>
+    set((s) => {
+      const record = opts?.recordHistory !== false && !s.gestureActive;
+      const deck = structuredClone(s.deck);
+      fn(deck);
+      return {
+        deck,
+        history: record ? [...s.history, snapshot(s)].slice(-50) : s.history,
+        future: record ? [] : s.future,
+        selectedElementIds: pruneSelection(deck, s.selectedElementIds),
+      };
+    }),
+
+  beginGesture: () =>
+    set((s) => {
+      if (s.gestureActive) return s;
+      return {
+        gestureActive: true,
+        history: [...s.history, snapshot(s)].slice(-50),
+        future: [],
+      };
+    }),
+
+  endGesture: () => set({ gestureActive: false }),
+
+  cancelGesture: () => {
+    const s = get();
+    if (!s.gestureActive) return;
+    const prev = s.history.at(-1);
+    if (!prev) {
+      set({ gestureActive: false });
+      return;
+    }
+    set({
+      deck: prev.deck,
+      currentSlideId: prev.currentSlideId,
+      selectedElementIds: prev.selectedElementIds,
+      history: s.history.slice(0, -1),
+      gestureActive: false,
+    });
+  },
+
+  addSlide: (index) =>
+    get().apply((d) => {
+      const slide = blankSlide('New slide');
+      const i = Math.max(0, Math.min(d.slides.length, index ?? d.slides.length));
+      d.slides.splice(i, 0, slide);
+    }),
+
+  deleteSlide: (id) =>
+    get().apply((d) => {
+      if (d.slides.length <= 1) return;
+      const i = d.slides.findIndex((s) => s.id === id);
+      if (i < 0) return;
+      d.slides = d.slides.filter((s) => s.id !== id);
+      const nextId = d.slides[Math.max(0, i - 1)]?.id || d.slides[0].id;
+      set({ currentSlideId: nextId });
+    }),
+
+  duplicateSlide: (id) =>
+    get().apply((d) => {
+      const i = d.slides.findIndex((s) => s.id === id);
+      if (i < 0) return;
+      const src = d.slides[i];
+      const clone = structuredClone(src);
+      clone.id = uid('slide');
+      clone.title = `${src.title} copy`;
+      const map = new Map<string, string>();
+      const elements: Record<string, DeckElement> = {};
+      clone.elementIds.forEach((oldId) => {
+        const element = clone.elements[oldId];
+        if (!element) return;
+        const newId = uid('el');
+        map.set(oldId, newId);
+        element.id = newId;
+        elements[newId] = element;
+      });
+      clone.elements = elements;
+      clone.elementIds = clone.elementIds.map((oldId) => map.get(oldId)!).filter(Boolean);
+      d.slides.splice(i + 1, 0, clone);
+    }),
+
+  reorderSlides: (from, to) =>
+    get().apply((d) => {
+      if (from < 0 || from >= d.slides.length || to < 0 || to >= d.slides.length || from === to) return;
+      const [slide] = d.slides.splice(from, 1);
+      d.slides.splice(to, 0, slide);
+    }),
+
+  renameSlide: (id, title) =>
+    get().apply((d) => {
+      const slide = d.slides.find((s) => s.id === id);
+      if (slide) slide.title = title;
+    }),
+
+  updateElement: (slideId, id, patch, opts) =>
+    get().apply((d) => {
+      const e = d.slides.find((s) => s.id === slideId)?.elements[id];
+      if (!e) return;
+      const prevPayload = e.payload;
+      Object.assign(e, patch);
+      if (patch.payload) e.payload = { ...prevPayload, ...patch.payload };
+    }, opts),
+
+  updateElements: (slideId, patches, opts) =>
+    get().apply((d) => {
+      const slide = d.slides.find((s) => s.id === slideId);
+      if (!slide) return;
+      for (const { id, patch } of patches) {
+        const e = slide.elements[id];
+        if (!e) continue;
+        Object.assign(e, patch);
+      }
+    }, opts),
+
+  deleteElement: (slideId, id) => get().deleteElements(slideId, [id]),
+
+  deleteElements: (slideId, ids) =>
+    get().apply((d) => {
+      const s = d.slides.find((x) => x.id === slideId);
+      if (!s) return;
+      for (const id of ids) {
+        delete s.elements[id];
+      }
+      s.elementIds = s.elementIds.filter((x) => !ids.includes(x));
+    }),
+
+  addElement: (slideId, e) =>
+    get().apply((d) => {
+      const s = d.slides.find((x) => x.id === slideId);
+      if (!s) return;
+      const boxed = clampBox(e.x, e.y, e.width, e.height);
+      s.elements[e.id] = { ...structuredClone(e), ...boxed };
+      s.elementIds.push(e.id);
+      syncZ(s);
+    }),
+
+  duplicateElement: (slideId, id) => get().duplicateElements(slideId, [id]),
+
+  duplicateElements: (slideId, ids) =>
+    get().apply((d) => {
+      const s = d.slides.find((x) => x.id === slideId);
+      if (!s) return;
+      const created: string[] = [];
+      for (const id of ids) {
+        const source = s.elements[id];
+        if (!source) continue;
+        const copy = structuredClone(source);
+        copy.id = uid('el');
+        const boxed = clampBox(copy.x + 24, copy.y + 24, copy.width, copy.height);
+        Object.assign(copy, boxed);
+        s.elements[copy.id] = copy;
+        s.elementIds.push(copy.id);
+        created.push(copy.id);
+      }
+      syncZ(s);
+      if (created.length) set({ selectedElementIds: created });
+    }),
+
+    moveElement: (from, to, id, x = 100, y = 100) =>
+      get().apply((d) => {
+        const source = d.slides.find(
+          (slide) => slide.id === from
+        );
+    
+        const destination = d.slides.find(
+          (slide) => slide.id === to
+        );
+    
+        if (
+          !source ||
+          !destination ||
+          !source.elements[id]
+        ) {
+          return;
+        }
+    
+        const element = source.elements[id];
+    
+        delete source.elements[id];
+    
+        source.elementIds = source.elementIds.filter(
+          (elementId) => elementId !== id
+        );
+    
+        element.x = Math.max(
+          0,
+          Math.min(W - element.width, x)
+        );
+    
+        element.y = Math.max(
+          0,
+          Math.min(H - element.height, y)
+        );
+    
+        destination.elements[id] = element;
+    
+        if (!destination.elementIds.includes(id)) {
+          destination.elementIds.push(id);
+        }
+      }),
+
+  bringForward: (slideId, id) =>
+    get().apply((d) => {
+      const s = d.slides.find((x) => x.id === slideId);
+      if (!s) return;
+      const i = s.elementIds.indexOf(id);
+      if (i < 0 || i >= s.elementIds.length - 1) return;
+      [s.elementIds[i], s.elementIds[i + 1]] = [s.elementIds[i + 1], s.elementIds[i]];
+      syncZ(s);
+    }),
+
+  sendBackward: (slideId, id) =>
+    get().apply((d) => {
+      const s = d.slides.find((x) => x.id === slideId);
+      if (!s) return;
+      const i = s.elementIds.indexOf(id);
+      if (i <= 0) return;
+      [s.elementIds[i], s.elementIds[i - 1]] = [s.elementIds[i - 1], s.elementIds[i]];
+      syncZ(s);
+    }),
+
+  undo: () =>
+    set((s) => {
+      const prev = s.history.at(-1);
+      if (!prev) return s;
+      return {
+        deck: prev.deck,
+        currentSlideId: prev.currentSlideId,
+        selectedElementIds: prev.selectedElementIds,
+        history: s.history.slice(0, -1),
+        future: [snapshot(s), ...s.future].slice(0, 50),
+        gestureActive: false,
+      };
+    }),
+
+  redo: () =>
+    set((s) => {
+      const next = s.future[0];
+      if (!next) return s;
+      return {
+        deck: next.deck,
+        currentSlideId: next.currentSlideId,
+        selectedElementIds: next.selectedElementIds,
+        history: [...s.history, snapshot(s)].slice(-50),
+        future: s.future.slice(1),
+        gestureActive: false,
+      };
+    }),
+
+  addChat: (m) => set((s) => ({ chat: [...s.chat, m] })),
+
+  loadDeck: (d, opts) =>
+    set((s) => {
+      const record = opts?.recordHistory !== false;
+      const nextId =
+        d.slides.some((slide) => slide.id === s.currentSlideId)
+          ? s.currentSlideId
+          : d.slides[0]?.id ?? '';
+      return {
+        deck: d,
+        currentSlideId: nextId,
+        selectedElementIds: pruneSelection(d, s.selectedElementIds),
+        history: record ? [...s.history, snapshot(s)].slice(-50) : s.history,
+        future: record ? [] : s.future,
+      };
+    }),
+}));
+import {
+  Deck,
+  W,
+  H,
+  uid,
+  makeChart,
+  makeTable,
+  makeText,
+  blankSlide,
+} from "@/types/deck";
+
+/**
+ * OpenAI-compatible / OpenRouter tool definitions.
+ *
+ * IMPORTANT:
+ * These use the Chat Completions tool format:
+ *
+ * {
+ *   type: "function",
+ *   function: {
+ *     name,
+ *     description,
+ *     parameters
+ *   }
+ * }
+ */
+
+export const tools = [
+  {
+    type: "function",
+    function: {
+      name: "plan_deck",
+      description:
+        "Create the outline for a new presentation before slides are populated.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+            description: "Presentation title.",
+          },
+          slides: {
+            type: "array",
+            description: "Ordered slide plan.",
+            items: {
+              type: "object",
+              properties: {
+                title: {
+                  type: "string",
+                },
+                layout: {
+                  type: "string",
+                  enum: [
+                    "title",
+                    "content",
+                    "two-column",
+                    "comparison",
+                    "section-break",
+                    "chart-forward",
+                    "blank",
+                  ],
+                },
+                purpose: {
+                  type: "string",
+                },
+              },
+              required: ["title", "layout", "purpose"],
+            },
+          },
+        },
+        required: ["title", "slides"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "add_slide",
+      description:
+        "Add a slide at a specific position in the presentation.",
+      parameters: {
+        type: "object",
+        properties: {
+          title: {
+            type: "string",
+          },
+          layout: {
+            type: "string",
+            enum: [
+              "title",
+              "content",
+              "two-column",
+              "comparison",
+              "section-break",
+              "chart-forward",
+              "blank",
+            ],
+          },
+          index: {
+            type: "integer",
+            description:
+              "Zero-based insertion index. Omit to add at the end.",
+          },
+        },
+        required: ["title", "layout"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "update_slide",
+      description:
+        "Update only specified metadata fields of an existing slide.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          title: {
+            type: "string",
+          },
+          layout: {
+            type: "string",
+          },
+          background: {
+            type: "string",
+          },
+          speaker_notes: {
+            type: "string",
+          },
+        },
+        required: ["slide_id"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "delete_slide",
+      description: "Delete an existing slide.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+        },
+        required: ["slide_id"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "duplicate_slide",
+      description:
+        "Duplicate an existing slide and all of its elements.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          index: {
+            type: "integer",
+          },
+        },
+        required: ["slide_id"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "reorder_slides",
+      description:
+        "Move an existing slide from one position to another.",
+      parameters: {
+        type: "object",
+        properties: {
+          from_index: {
+            type: "integer",
+          },
+          to_index: {
+            type: "integer",
+          },
+        },
+        required: ["from_index", "to_index"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "add_element",
+      description:
+        "Add a positioned element to a slide. Elements can be text, image, table, or shape. For a table, provide headers and rows. Charts should use add_chart.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          type: {
+            type: "string",
+            enum: ["text", "image", "table", "shape"],
+          },
+          x: {
+            type: "number",
+          },
+          y: {
+            type: "number",
+          },
+          width: {
+            type: "number",
+          },
+          height: {
+            type: "number",
+          },
+          text: {
+            type: "string",
+          },
+          src: {
+            type: "string",
+          },
+          fill: {
+            type: "string",
+          },
+          headers: {
+            type: "array",
+            description: "Column names for a table element.",
+            items: {
+              type: "string",
+            },
+          },
+          rows: {
+            type: "array",
+            description: "Rows for a table element. Each row is an array of cell strings.",
+            items: {
+              type: "array",
+              items: {
+                type: "string",
+              },
+            },
+          },
+        },
+        required: [
+          "slide_id",
+          "type",
+          "x",
+          "y",
+          "width",
+          "height",
+        ],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "update_element",
+      description:
+        "Patch only the specified fields of an existing element. Preserve all unspecified fields.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          x: {
+            type: "number",
+          },
+          y: {
+            type: "number",
+          },
+          width: {
+            type: "number",
+          },
+          height: {
+            type: "number",
+          },
+          text: {
+            type: "string",
+          },
+          fill: {
+            type: "string",
+          },
+          rotation: {
+            type: "number",
+          },
+        },
+        required: ["slide_id", "element_id"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "delete_element",
+      description: "Delete a single element from a slide.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+        },
+        required: ["slide_id", "element_id"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "move_element",
+      description:
+        "Move an element within a slide or transfer it to another slide. Preserve the element ID.",
+      parameters: {
+        type: "object",
+        properties: {
+          from_slide_id: {
+            type: "string",
+          },
+          to_slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          x: {
+            type: "number",
+          },
+          y: {
+            type: "number",
+          },
+        },
+        required: [
+          "from_slide_id",
+          "to_slide_id",
+          "element_id",
+        ],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "resize_element",
+      description:
+        "Resize an existing element while preserving its content and identity.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          width: {
+            type: "number",
+          },
+          height: {
+            type: "number",
+          },
+        },
+        required: [
+          "slide_id",
+          "element_id",
+          "width",
+          "height",
+        ],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "reorder_elements",
+      description:
+        "Change the z-order of elements on a slide.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          z_index: {
+            type: "integer",
+          },
+        },
+        required: [
+          "slide_id",
+          "element_id",
+          "z_index",
+        ],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "add_chart",
+      description:
+        "Create a real editable chart element. Use bar, line, or pie.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          x: {
+            type: "number",
+          },
+          y: {
+            type: "number",
+          },
+          width: {
+            type: "number",
+          },
+          height: {
+            type: "number",
+          },
+          chart_type: {
+            type: "string",
+            enum: ["bar", "line", "pie"],
+          },
+          title: {
+            type: "string",
+          },
+          categories: {
+            type: "array",
+            items: {
+              type: "string",
+            },
+          },
+          series: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                },
+                data: {
+                  type: "array",
+                  items: {
+                    type: "number",
+                  },
+                },
+              },
+              required: ["name", "data"],
+            },
+          },
+        },
+        required: [
+          "slide_id",
+          "chart_type",
+          "title",
+          "categories",
+          "series",
+        ],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "update_table_data",
+      description:
+        "Replace the headers and rows of an existing editable table without changing its position or identity.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          headers: {
+            type: "array",
+            items: {
+              type: "string",
+            },
+          },
+          rows: {
+            type: "array",
+            items: {
+              type: "array",
+              items: {
+                type: "string",
+              },
+            },
+          },
+        },
+        required: ["slide_id", "element_id", "headers", "rows"],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "update_chart_data",
+      description:
+        "Replace the data of an existing chart without changing its position or identity.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          categories: {
+            type: "array",
+            items: {
+              type: "string",
+            },
+          },
+          series: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: {
+                  type: "string",
+                },
+                data: {
+                  type: "array",
+                  items: {
+                    type: "number",
+                  },
+                },
+              },
+              required: ["name", "data"],
+            },
+          },
+        },
+        required: [
+          "slide_id",
+          "element_id",
+          "categories",
+          "series",
+        ],
+      },
+    },
+  },
+
+  {
+    type: "function",
+    function: {
+      name: "change_chart_type",
+      description:
+        "Change a chart between bar, line, and pie while preserving its data.",
+      parameters: {
+        type: "object",
+        properties: {
+          slide_id: {
+            type: "string",
+          },
+          element_id: {
+            type: "string",
+          },
+          chart_type: {
+            type: "string",
+            enum: ["bar", "line", "pie"],
+          },
+        },
+        required: [
+          "slide_id",
+          "element_id",
+          "chart_type",
+        ],
+      },
+    },
+  },
+];
+
+/**
+ * Compact canonical deck representation sent to the model.
+ *
+ * This is intentionally derived from the actual Deck object rather
+ * than maintaining a second AI-specific copy.
+ */
+export function deckContext(deck: Deck) {
+  return JSON.stringify(
+    {
+      deck_id: deck.id,
+      title: deck.title,
+      aspect_ratio: deck.aspectRatio,
+
+      slides: deck.slides.map((slide, index) => ({
+        index,
+        id: slide.id,
+        title: slide.title,
+        layout: slide.layout,
+        background: slide.background,
+        speaker_notes: slide.speakerNotes,
+
+        element_ids: slide.elementIds,
+
+        elements: slide.elementIds.map((id) => {
+          const element = slide.elements[id];
+
+          if (!element) {
+            return {
+              id,
+              error: "element reference is missing",
+            };
+          }
+
+          return {
+            id: element.id,
+            type: element.type,
+
+            x: element.x,
+            y: element.y,
+            width: element.width,
+            height: element.height,
+            rotation: element.rotation,
+            zIndex: element.zIndex,
+
+            text: element.payload?.richText?.text,
+
+            image: element.payload?.src,
+
+            chart: element.payload?.chart,
+
+            table: element.payload?.table,
+          };
+        }),
+      })),
+    },
+    null,
+    2
+  );
+}
+
+/**
+ * Find slide by ID.
+ */
+function findSlide(deck: Deck, slideId?: string) {
+  if (!slideId) {
+    return undefined;
+  }
+
+  return deck.slides.find((slide) => slide.id === slideId);
+}
+
+/**
+ * Find element by slide + element ID.
+ */
+function findElement(
+  deck: Deck,
+  slideId?: string,
+  elementId?: string
+) {
+  const slide = findSlide(deck, slideId);
+
+  if (!slide || !elementId) {
+    return undefined;
+  }
+
+  return slide.elements[elementId];
+}
+
+/**
+ * Clamp a position so an element cannot overflow the 1600x900
+ * artboard.
+ */
+function clampPosition(
+  x: number,
+  y: number,
+  width: number,
+  height: number
+) {
+  return {
+    x: Math.max(0, Math.min(W - width, x)),
+    y: Math.max(0, Math.min(H - height, y)),
+  };
+}
+
+function overlaps(
+  a: { x: number; y: number; width: number; height: number },
+  b: { x: number; y: number; width: number; height: number }
+) {
+  return (
+    a.x < b.x + b.width &&
+    a.x + a.width > b.x &&
+    a.y < b.y + b.height &&
+    a.y + a.height > b.y
+  );
+}
+
+function findFreePosition(
+  slide: { elementIds: string[]; elements: Record<string, any> },
+  element: { width: number; height: number },
+  requestedX: number,
+  requestedY: number
+) {
+  const clamp = (x: number, y: number) =>
+    clampPosition(x, y, element.width, element.height);
+
+  const start = clamp(requestedX, requestedY);
+  const candidates: Array<{ x: number; y: number }> = [{ ...start }];
+  const step = Math.max(40, Math.min(element.width, element.height) * 0.35);
+
+  for (let radius = 1; radius <= 14; radius++) {
+    const d = radius * step;
+    candidates.push(
+      { x: start.x + d, y: start.y },
+      { x: start.x - d, y: start.y },
+      { x: start.x, y: start.y + d },
+      { x: start.x, y: start.y - d },
+      { x: start.x + d, y: start.y + d },
+      { x: start.x - d, y: start.y + d },
+      { x: start.x + d, y: start.y - d },
+      { x: start.x - d, y: start.y - d }
+    );
+  }
+
+  for (const candidate of candidates) {
+    const p = clamp(candidate.x, candidate.y);
+    const probe = { ...element, x: p.x, y: p.y };
+    const collision = slide.elementIds.some((id) => {
+      const other = slide.elements[id];
+      return other ? overlaps(probe, other) : false;
+    });
+    if (!collision) return p;
+  }
+
+  return start;
+}
+
+/**
+ * Apply one AI tool mutation to the canonical deck.
+ */
+export function applyTool(
+  deck: Deck,
+  name: string,
+  args: any
+) {
+  switch (name) {
+    case "plan_deck": {
+      deck.title = args.title || deck.title;
+      deck.slides = (args.slides || []).map((planned: { title: string; layout?: string; purpose?: string }) => {
+        const slide = blankSlide(planned.title);
+        slide.layout = (planned.layout as typeof slide.layout) || "content";
+        slide.speakerNotes = planned.purpose || "";
+        return slide;
+      });
+      if (deck.slides.length === 0) {
+        deck.slides = [blankSlide("Untitled slide")];
+      }
+      return {
+        planned: true,
+        title: deck.title,
+        slides: deck.slides.map((slide, index) => ({
+          index,
+          id: slide.id,
+          title: slide.title,
+          layout: slide.layout,
+        })),
+      };
+    }
+
+    case "add_slide": {
+      const slide: any = {
+        id: uid("slide"),
+        title: args.title,
+        layout: args.layout,
+        background: "#ffffff",
+        speakerNotes: "",
+        elementIds: [],
+        elements: {},
+      };
+
+      const index = Math.max(
+        0,
+        Math.min(
+          deck.slides.length,
+          args.index ?? deck.slides.length
+        )
+      );
+
+      deck.slides.splice(index, 0, slide);
+
+      return {
+        success: true,
+        slide_id: slide.id,
+        index,
+      };
+    }
+
+    case "update_slide": {
+      const slide = findSlide(deck, args.slide_id);
+
+      if (!slide) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      if (args.title !== undefined) {
+        slide.title = args.title;
+      }
+
+      if (args.layout !== undefined) {
+        slide.layout = args.layout;
+      }
+
+      if (args.background !== undefined) {
+        slide.background = args.background;
+      }
+
+      if (args.speaker_notes !== undefined) {
+        slide.speakerNotes = args.speaker_notes;
+      }
+
+      return {
+        success: true,
+        slide_id: slide.id,
+      };
+    }
+
+    case "delete_slide": {
+      const index = deck.slides.findIndex(
+        (slide) => slide.id === args.slide_id
+      );
+
+      if (index === -1) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      deck.slides.splice(index, 1);
+
+      return {
+        success: true,
+        deleted_slide_id: args.slide_id,
+      };
+    }
+
+    case "duplicate_slide": {
+      const sourceIndex = deck.slides.findIndex(
+        (slide) => slide.id === args.slide_id
+      );
+
+      if (sourceIndex === -1) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      const source = deck.slides[sourceIndex];
+
+      const newSlide: any = {
+        ...source,
+        id: uid("slide"),
+        title: `${source.title} copy`,
+        elementIds: [],
+        elements: {},
+      };
+
+      for (const elementId of source.elementIds) {
+        const sourceElement = source.elements[elementId];
+
+        if (!sourceElement) {
+          continue;
+        }
+
+        const copiedElement = {
+          ...sourceElement,
+          id: uid("el"),
+          payload: {
+            ...sourceElement.payload,
+          },
+        };
+
+        newSlide.elements[copiedElement.id] =
+          copiedElement;
+
+        newSlide.elementIds.push(
+          copiedElement.id
+        );
+      }
+
+      const targetIndex =
+        args.index !== undefined
+          ? Math.max(
+              0,
+              Math.min(deck.slides.length, args.index)
+            )
+          : sourceIndex + 1;
+
+      deck.slides.splice(
+        targetIndex,
+        0,
+        newSlide
+      );
+
+      return {
+        success: true,
+        slide_id: newSlide.id,
+        index: targetIndex,
+      };
+    }
+
+    case "reorder_slides": {
+      if (
+        args.from_index < 0 ||
+        args.from_index >= deck.slides.length
+      ) {
+        return {
+          success: false,
+          error: "invalid from_index",
+        };
+      }
+
+      const [slide] = deck.slides.splice(
+        args.from_index,
+        1
+      );
+
+      const targetIndex = Math.max(
+        0,
+        Math.min(
+          deck.slides.length,
+          args.to_index
+        )
+      );
+
+      deck.slides.splice(
+        targetIndex,
+        0,
+        slide
+      );
+
+      return {
+        success: true,
+        from_index: args.from_index,
+        to_index: targetIndex,
+      };
+    }
+
+    case "add_element": {
+      const slide = findSlide(
+        deck,
+        args.slide_id
+      );
+
+      if (!slide) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      const width = Math.max(
+        40,
+        args.width ?? 400
+      );
+
+      const height = Math.max(
+        30,
+        args.height ?? 180
+      );
+
+      const position = clampPosition(
+        args.x ?? 100,
+        args.y ?? 100,
+        width,
+        height
+      );
+
+      const element: any = {
+        id: uid("el"),
+        type: args.type,
+        x: position.x,
+        y: position.y,
+        width,
+        height,
+        zIndex: slide.elementIds.length + 1,
+        payload: {},
+      };
+
+      if (args.text !== undefined) {
+        element.payload.richText = {
+          text: args.text,
+        };
+      }
+
+      if (args.src !== undefined) {
+        element.payload.src = args.src;
+      }
+
+      if (args.fill !== undefined) {
+        element.payload.fill = args.fill;
+      }
+
+      if (args.type === "table") {
+        const headers =
+          Array.isArray(args.headers) && args.headers.length > 0
+            ? args.headers.map((value: unknown) => String(value))
+            : ["Column 1", "Column 2"];
+
+        const rows =
+          Array.isArray(args.rows)
+            ? args.rows.map((row: unknown) =>
+                Array.isArray(row)
+                  ? row.map((value: unknown) => String(value))
+                  : []
+              )
+            : [
+                ["Value 1", "Value 2"],
+                ["Value 3", "Value 4"],
+              ];
+
+        element.payload.table = {
+          headers,
+          rows,
+        };
+      }
+
+      slide.elements[element.id] = element;
+      slide.elementIds.push(element.id);
+
+      return {
+        success: true,
+        element_id: element.id,
+        slide_id: slide.id,
+      };
+    }
+
+    case "update_element": {
+      const element = findElement(
+        deck,
+        args.slide_id,
+        args.element_id
+      );
+
+      if (!element) {
+        return {
+          success: false,
+          error: "element not found",
+        };
+      }
+
+      for (const key of [
+        "x",
+        "y",
+        "width",
+        "height",
+        "rotation",
+      ]) {
+        if (args[key] !== undefined) {
+          (element as any)[key] = args[key];
+        }
+      }
+
+      if (args.text !== undefined) {
+        element.payload.richText = {
+          ...(element.payload.richText || {}),
+          text: args.text,
+        };
+      }
+
+      if (args.fill !== undefined) {
+        element.payload.fill = args.fill;
+      }
+
+      return {
+        success: true,
+        element_id: element.id,
+      };
+    }
+
+    case "delete_element": {
+      const slide = findSlide(
+        deck,
+        args.slide_id
+      );
+
+      if (!slide) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      if (!slide.elements[args.element_id]) {
+        return {
+          success: false,
+          error: "element not found",
+        };
+      }
+
+      delete slide.elements[args.element_id];
+
+      slide.elementIds =
+        slide.elementIds.filter(
+          (id) => id !== args.element_id
+        );
+
+      return {
+        success: true,
+        element_id: args.element_id,
+      };
+    }
+
+    case "move_element": {
+      const sourceSlide = findSlide(deck, args.from_slide_id);
+      const destinationSlide = findSlide(deck, args.to_slide_id);
+
+      if (!sourceSlide || !destinationSlide) {
+        return {
+          success: false,
+          error: "source or destination slide not found. A move can only target an existing slide.",
+        };
+      }
+
+      const element = sourceSlide.elements[args.element_id];
+
+      if (!element) {
+        return {
+          success: false,
+          error: "element not found",
+        };
+      }
+
+      if (sourceSlide.id === destinationSlide.id) {
+        const searchSlide = {
+          elementIds: destinationSlide.elementIds.filter((id) => id !== element.id),
+          elements: destinationSlide.elements,
+        };
+        const position = findFreePosition(
+          searchSlide,
+          element,
+          args.x ?? element.x,
+          args.y ?? element.y
+        );
+        element.x = position.x;
+        element.y = position.y;
+
+        return {
+          success: true,
+          element_id: element.id,
+          from_slide_id: sourceSlide.id,
+          to_slide_id: destinationSlide.id,
+          x: element.x,
+          y: element.y,
+        };
+      }
+
+      const position = findFreePosition(
+        destinationSlide,
+        element,
+        args.x ?? 120,
+        args.y ?? 120
+      );
+
+      delete sourceSlide.elements[element.id];
+      sourceSlide.elementIds = sourceSlide.elementIds.filter(
+        (id) => id !== element.id
+      );
+
+      element.x = position.x;
+      element.y = position.y;
+      element.zIndex =
+        destinationSlide.elementIds.reduce(
+          (max, id) => Math.max(max, destinationSlide.elements[id]?.zIndex || 0),
+          0
+        ) + 1;
+
+      destinationSlide.elements[element.id] = element;
+      destinationSlide.elementIds.push(element.id);
+
+      return {
+        success: true,
+        element_id: element.id,
+        from_slide_id: sourceSlide.id,
+        to_slide_id: destinationSlide.id,
+        x: element.x,
+        y: element.y,
+        note: "Moved to the existing destination slide without moving or replacing existing elements.",
+      };
+    }
+
+    case "resize_element": {
+      const element = findElement(
+        deck,
+        args.slide_id,
+        args.element_id
+      );
+
+      if (!element) {
+        return {
+          success: false,
+          error: "element not found",
+        };
+      }
+
+      element.width = Math.max(
+        40,
+        args.width
+      );
+
+      element.height = Math.max(
+        30,
+        args.height
+      );
+
+      const position = clampPosition(
+        element.x,
+        element.y,
+        element.width,
+        element.height
+      );
+
+      element.x = position.x;
+      element.y = position.y;
+
+      return {
+        success: true,
+        element_id: element.id,
+      };
+    }
+
+    case "reorder_elements": {
+      const slide = findSlide(
+        deck,
+        args.slide_id
+      );
+
+      if (!slide) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      const index =
+        slide.elementIds.indexOf(
+          args.element_id
+        );
+
+      if (index === -1) {
+        return {
+          success: false,
+          error: "element not found",
+        };
+      }
+
+      slide.elementIds.splice(index, 1);
+
+      const targetIndex = Math.max(
+        0,
+        Math.min(
+          slide.elementIds.length,
+          args.z_index
+        )
+      );
+
+      slide.elementIds.splice(
+        targetIndex,
+        0,
+        args.element_id
+      );
+
+      slide.elementIds.forEach(
+        (id, i) => {
+          if (slide.elements[id]) {
+            slide.elements[id].zIndex =
+              i + 1;
+          }
+        }
+      );
+
+      return {
+        success: true,
+        element_id: args.element_id,
+        z_index: targetIndex,
+      };
+    }
+
+    case "add_chart": {
+      const slide = findSlide(
+        deck,
+        args.slide_id
+      );
+
+      if (!slide) {
+        return {
+          success: false,
+          error: "slide not found",
+        };
+      }
+
+      const width = Math.max(
+        200,
+        args.width ?? 600
+      );
+
+      const height = Math.max(
+        150,
+        args.height ?? 350
+      );
+
+      const position = clampPosition(
+        args.x ?? 850,
+        args.y ?? 220,
+        width,
+        height
+      );
+
+      const chart = makeChart(
+        {
+          type: args.chart_type,
+          title: args.title,
+          categories: args.categories,
+          series: args.series,
+        },
+        position.x,
+        position.y,
+        width,
+        height,
+        slide.elementIds.length + 1
+      );
+
+      slide.elements[chart.id] = chart;
+      slide.elementIds.push(chart.id);
+
+      return {
+        success: true,
+        element_id: chart.id,
+        slide_id: slide.id,
+      };
+    }
+
+    case "update_table_data": {
+      const element = findElement(
+        deck,
+        args.slide_id,
+        args.element_id
+      );
+
+      if (
+        !element ||
+        element.type !== "table" ||
+        !element.payload.table
+      ) {
+        return {
+          success: false,
+          error: "table not found",
+        };
+      }
+
+      if (
+        !Array.isArray(args.headers) ||
+        !Array.isArray(args.rows)
+      ) {
+        return {
+          success: false,
+          error: "headers and rows are required",
+        };
+      }
+
+      const headers = args.headers.map((value: unknown) =>
+        String(value)
+      );
+
+      const rows = args.rows.map((row: unknown) =>
+        Array.isArray(row)
+          ? row.map((value: unknown) => String(value))
+          : []
+      );
+
+      element.payload.table.headers = headers;
+      element.payload.table.rows = rows;
+
+      return {
+        success: true,
+        element_id: element.id,
+        headers,
+        row_count: rows.length,
+      };
+    }
+
+    case "update_chart_data": {
+      const element = findElement(
+        deck,
+        args.slide_id,
+        args.element_id
+      );
+
+      if (
+        !element ||
+        element.type !== "chart" ||
+        !element.payload.chart
+      ) {
+        return {
+          success: false,
+          error: "chart not found",
+        };
+      }
+
+      element.payload.chart.categories =
+        args.categories;
+
+      element.payload.chart.series =
+        args.series;
+
+      return {
+        success: true,
+        element_id: element.id,
+      };
+    }
+
+    case "change_chart_type": {
+      const element = findElement(
+        deck,
+        args.slide_id,
+        args.element_id
+      );
+
+      if (
+        !element ||
+        element.type !== "chart" ||
+        !element.payload.chart
+      ) {
+        return {
+          success: false,
+          error: "chart not found",
+        };
+      }
+
+      element.payload.chart.type =
+        args.chart_type;
+
+      return {
+        success: true,
+        element_id: element.id,
+        chart_type: args.chart_type,
+      };
+    }
+
+    default:
+      return {
+        success: false,
+        error: `Unknown tool: ${name}`,
+      };
+  }
+}import { GoogleGenAI } from "@google/genai";
+import { NextRequest } from "next/server";
+import { tools, deckContext, applyTool } from "@/lib/ai-tools";
+import { Deck } from "@/types/deck";
+
+const SYSTEM = `
+You are the agentic editing engine for Decksmith, an AI presentation builder.
+
+The canvas is 1600x900 (16:9). You operate only through tools.
+
+RULES:
+1. Never regenerate or replace the entire deck during an edit. Use surgical tools.
+2. Preserve stable slide IDs and element IDs unless plan_deck is required.
+3. Preserve manual user changes.
+4. New presentation / "create a deck": you MUST call plan_deck first.
+5. plan_deck creates the requested empty slide structure and returns their IDs.
+6. After plan_deck, populate those existing slides with add_element / add_chart.
+7. Do not call add_slide for slides that plan_deck already created.
+8. Edits: never call plan_deck.
+9. Patch only what the user asked for.
+10. Use real charts and tables when asked.
+11. Do not delete and recreate an element just to edit its text.
+12. Never invent IDs. Use IDs from the current deck context.
+13. When the user asks to move an existing element to another slide, ALWAYS move the existing element.
+14. NEVER create a new slide to satisfy a move request.
+15. A destination slide must already exist.
+16. Preserve every existing element on the destination slide.
+17. Do not move, delete, replace, or regenerate destination elements to make room.
+18. When moving an element, use the move_element tool.
+19. If the request is already satisfied, stop and respond briefly.
+20. Keep layouts visually balanced inside 1600x900.
+21. The current deck context is the canonical source of truth.
+`;
+
+function getClient(): GoogleGenAI {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error(
+      "GEMINI_API_KEY is not configured. Add it to .env.local.",
+    );
+  }
+
+  return new GoogleGenAI({
+    apiKey,
+  });
+}
+
+/**
+ * Convert the existing OpenAI-style tool definitions
+ * from lib/ai-tools.ts into Gemini function declarations.
+ *
+ * Existing format:
+ *
+ * {
+ *   type: "function",
+ *   function: {
+ *     name,
+ *     description,
+ *     parameters
+ *   }
+ * }
+ *
+ * Gemini format:
+ *
+ * {
+ *   name,
+ *   description,
+ *   parametersJsonSchema
+ * }
+ */
+function normalizeGeminiTools(rawTools: any[]) {
+  return rawTools
+    .map((tool: any) => {
+      if (
+        tool?.type === "function" &&
+        tool?.function &&
+        typeof tool.function === "object"
+      ) {
+        return {
+          name: tool.function.name,
+          description: tool.function.description || "",
+          parametersJsonSchema:
+            tool.function.parameters || {
+              type: "object",
+              properties: {},
+            },
+        };
+      }
+
+      if (tool?.type === "function" && tool?.name) {
+        return {
+          name: tool.name,
+          description: tool.description || "",
+          parametersJsonSchema:
+            tool.parameters || {
+              type: "object",
+              properties: {},
+            },
+        };
+      }
+
+      if (tool?.name) {
+        return {
+          name: tool.name,
+          description: tool.description || "",
+          parametersJsonSchema:
+            tool.parameters || {
+              type: "object",
+              properties: {},
+            },
+        };
+      }
+
+      return null;
+    })
+    .filter(Boolean);
+}
+
+function sse(
+  controller: ReadableStreamDefaultController,
+  encoder: TextEncoder,
+  payload: unknown,
+) {
+  controller.enqueue(
+    encoder.encode(`data: ${JSON.stringify(payload)}\n\n`),
+  );
+}
+
+function explicitlyRequestsNewSlide(prompt: string) {
+  return (
+    /\b(add|create|insert|new|another)\b[\s\S]{0,50}\bslide\b/i.test(
+      prompt,
+    ) ||
+    /\bslide\b[\s\S]{0,50}\b(add|create|insert|new|another)\b/i.test(
+      prompt,
+    )
+  );
+}
+
+function hasMoveIntent(prompt: string) {
+  return /\b(move|transfer|relocate|drag|place)\b/i.test(prompt);
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+
+    const deck: Deck = body.deck;
+
+    if (!deck) {
+      return Response.json(
+        {
+          error: 'Deck is required',
+        },
+        {
+          status: 400,
+        }
+      );
+    }
+
+    const prompt: string = body.prompt;
+    const mode: "generate" | "edit" = body.mode || "edit";
+
+    const history: {
+      role: "user" | "assistant";
+      text: string;
+    }[] = body.history || [];
+
+    if (!deck) {
+      return Response.json(
+        { error: "Deck is required." },
+        { status: 400 },
+      );
+    }
+
+    if (!prompt) {
+      return Response.json(
+        { error: "Prompt is required." },
+        { status: 400 },
+      );
+    }
+
+    if (!process.env.GEMINI_API_KEY) {
+      return Response.json(
+        {
+          error:
+            "GEMINI_API_KEY is not configured. Add your Gemini API key to .env.local.",
+        },
+        { status: 503 },
+      );
+    }
+
+    const encoder = new TextEncoder();
+
+    const stream = new ReadableStream({
+      async start(controller) {
+        try {
+          const client = getClient();
+
+          const model =
+            process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+          const functionDeclarations = normalizeGeminiTools(
+            tools as any[],
+          );
+
+          const recent = history
+            .slice(-8)
+            .map((m) => `${m.role}: ${m.text}`)
+            .join("\n");
+
+          /**
+           * Gemini conversation history.
+           *
+           * We keep the model/tool interaction history explicitly
+           * because every tool result must be sent back to Gemini
+           * before it decides the next mutation.
+           */
+          const contents: any[] = [
+            {
+              role: "user",
+              parts: [
+                {
+                  text: `
+${SYSTEM}
+
+Current deck:
+
+${deckContext(deck)}
+
+Recent conversation:
+${recent || "(none)"}
+
+User request:
+${prompt}
+
+Mode:
+${mode}
+
+${
+  mode === "generate"
+    ? "This is initial generation. Call plan_deck first, then populate the returned slide IDs."
+    : "This is an edit. Do not call plan_deck. Patch only what the user asked for."
+}
+`,
+                },
+              ],
+            },
+          ];
+
+          const maxTurns = mode === "generate" ? 30 : 15;
+
+          const applied: any[] = [];
+
+          let planned = false;
+
+          for (let turn = 0; turn < maxTurns; turn++) {
+            const config: any = {
+              systemInstruction: SYSTEM,
+
+              tools: [
+                {
+                  functionDeclarations,
+                },
+              ],
+            };
+
+            /**
+             * During first generation force plan_deck.
+             *
+             * Gemini's function calling configuration supports
+             * restricting allowed function names.
+             */
+            if (mode === "generate" && !planned) {
+              config.toolConfig = {
+                functionCallingConfig: {
+                  mode: "ANY",
+                  allowedFunctionNames: ["plan_deck"],
+                },
+              };
+            }
+
+            const response = await client.models.generateContent({
+              model,
+              contents,
+              config,
+            });
+
+            const candidate = response.candidates?.[0];
+
+            if (!candidate) {
+              sse(controller, encoder, {
+                type: "error",
+                error: "The AI returned no candidate response.",
+              });
+              break;
+            }
+
+            const parts = candidate.content?.parts || [];
+
+            const functionCalls = parts.filter(
+              (part: any) => part.functionCall,
+            );
+
+            /**
+             * No tool call means Gemini has finished reasoning.
+             */
+            if (functionCalls.length === 0) {
+              const text =
+                response.text ||
+                "Applied the requested changes.";
+
+              sse(controller, encoder, {
+                type: "done",
+                message: text,
+                deck,
+                applied,
+              });
+
+              break;
+            }
+
+            /**
+             * Preserve Gemini's model response before sending
+             * function results back.
+             */
+            contents.push(candidate.content);
+
+            for (const part of functionCalls) {
+              const functionCall = part.functionCall;
+
+              if (!functionCall?.name) {
+                continue;
+              }
+
+              const toolName = functionCall.name;
+              const args = functionCall.args || {};
+
+              /**
+               * Safety guard:
+               *
+               * If the user asked to move something, do not allow
+               * Gemini to accidentally create a new slide.
+               */
+              if (
+                mode === "edit" &&
+                toolName === "add_slide" &&
+                hasMoveIntent(prompt) &&
+                !explicitlyRequestsNewSlide(prompt)
+              ) {
+                const blocked = {
+                  success: false,
+                  error:
+                    "This is a move request. Do not create a new slide. Move the existing element to the existing destination slide.",
+                };
+
+                applied.push({
+                  tool: toolName,
+                  args,
+                  result: blocked,
+                });
+
+                contents.push({
+                  role: "user",
+                  parts: [
+                    {
+                      functionResponse: {
+                        name: toolName,
+                        response: blocked,
+                      },
+                    },
+                  ],
+                });
+
+                sse(controller, encoder, {
+                  type: "tool",
+                  tool: toolName,
+                  result: blocked,
+                  deck: structuredClone(deck),
+                  applied,
+                });
+
+                continue;
+              }
+
+              if (
+                mode === "edit" &&
+                toolName === "plan_deck"
+              ) {
+                const blocked = {
+                  success: false,
+                  error:
+                    "plan_deck is not allowed during edits. Use surgical editing tools.",
+                };
+
+                applied.push({
+                  tool: toolName,
+                  args,
+                  result: blocked,
+                });
+
+                contents.push({
+                  role: "user",
+                  parts: [
+                    {
+                      functionResponse: {
+                        name: toolName,
+                        response: blocked,
+                      },
+                    },
+                  ],
+                });
+
+                sse(controller, encoder, {
+                  type: "tool",
+                  tool: toolName,
+                  result: blocked,
+                  deck: structuredClone(deck),
+                  applied,
+                });
+
+                continue;
+              }
+
+              let result: any;
+
+              try {
+                result = applyTool(
+                  deck,
+                  toolName,
+                  args,
+                );
+              } catch (error: any) {
+                result = {
+                  success: false,
+                  error:
+                    error?.message ||
+                    `Tool ${toolName} failed`,
+                };
+              }
+
+              if (toolName === "plan_deck" && result?.planned === true) {
+                planned = true;
+              }
+
+              applied.push({
+                tool: toolName,
+                args,
+                result,
+              });
+
+              /**
+               * Send the actual tool result back to Gemini.
+               */
+              contents.push({
+                role: "user",
+                parts: [
+                  {
+                    functionResponse: {
+                      name: toolName,
+                      response: result,
+                    },
+                  },
+                ],
+              });
+
+              /**
+               * Send intermediate tool state to the frontend.
+               */
+              sse(controller, encoder, {
+                type: "tool",
+                tool: toolName,
+                result,
+                deck: structuredClone(deck),
+                applied,
+              });
+            }
+
+            /**
+             * Give Gemini the updated canonical deck.
+             *
+             * This is important for chained operations such as:
+             *
+             * plan_deck
+             *   ↓
+             * add_slide/content
+             *   ↓
+             * add_chart
+             *   ↓
+             * update chart
+             *
+             * or:
+             *
+             * move chart
+             *   ↓
+             * inspect updated destination
+             *   ↓
+             * continue
+             */
+            contents.push({
+              role: "user",
+              parts: [
+                {
+                  text: `
+Updated canonical deck after the latest tool calls:
+
+${deckContext(deck)}
+
+Continue only if more mutations are required.
+
+Do not regenerate unchanged slides or elements.
+Do not create a slide for an element movement.
+Preserve all existing destination elements.
+`,
+                },
+              ],
+            });
+
+            if (turn === maxTurns - 1) {
+              sse(controller, encoder, {
+                type: "done",
+                message: "Applied the requested changes.",
+                deck,
+                applied,
+              });
+            }
+          }
+        } catch (error: any) {
+          sse(controller, encoder, {
+            type: "error",
+            error:
+              error?.message ||
+              "Gemini request failed",
+          });
+        } finally {
+          controller.close();
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type":
+          "text/event-stream; charset=utf-8",
+        "Cache-Control":
+          "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  } catch (error: any) {
+    return Response.json(
+      {
+        error:
+          error?.message ||
+          "AI request failed",
+      },
+      { status: 500 },
+    );
+  }
+}export type ElementType = 'text' | 'image' | 'chart' | 'table' | 'shape';
+
+export type ChartType = 'bar' | 'line' | 'pie';
+
+export type SlideLayout =
+  | 'title'
+  | 'content'
+  | 'two-column'
+  | 'comparison'
+  | 'section-break'
+  | 'chart-forward'
+  | 'blank';
+
+export type RichText = {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  align?: 'left' | 'center' | 'right';
+};
+
+export type ChartSpec = {
+  type: ChartType;
+  title: string;
+  categories: string[];
+  series: {
+    name: string;
+    data: number[];
+  }[];
+  colors?: string[];
+};
+
+export type TableSpec = {
+  headers: string[];
+  rows: string[][];
+};
+
+export type ElementPayload = {
+  richText?: RichText;
+  src?: string;
+  alt?: string;
+  chart?: ChartSpec;
+  table?: TableSpec;
+  fill?: string;
+  radius?: number;
+};
+
+export type DeckElement = {
+  id: string;
+  type: ElementType;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  rotation?: number;
+  zIndex: number;
+  locked?: boolean;
+  payload: ElementPayload;
+};
+
+export type Slide = {
+  id: string;
+  title: string;
+  layout: SlideLayout;
+  background: string;
+  speakerNotes: string;
+  elementIds: string[];
+  elements: Record<string, DeckElement>;
+};
+
+export type Deck = {
+  id: string;
+  title: string;
+  theme: {
+    name: string;
+    accent: string;
+  };
+  aspectRatio: '16:9';
+  slides: Slide[];
+};
+
+export type HistoryState = {
+  deck: Deck;
+  selectedElementIds: string[];
+  currentSlideId: string;
+};
+
+export const W = 1600;
+export const H = 900;
+
+export const uid = (prefix: string) =>
+  `${prefix}_${Math.random().toString(36).slice(2, 9)}_${Date.now().toString(36)}`;
+
+export function emptyDeck(): Deck {
+  const slide = blankSlide('Untitled slide');
+  return {
+    id: uid('deck'),
+    title: 'Untitled Presentation',
+    theme: {
+      name: 'Aurora',
+      accent: '#635BFF',
+    },
+    aspectRatio: '16:9',
+    slides: [slide],
+  };
+}
+
+export function makeImage(
+  src: string,
+  x = 200,
+  y = 180,
+  width = 640,
+  height = 360,
+  zIndex = 1,
+): DeckElement {
+  return {
+    id: uid('el'),
+    type: 'image',
+    x,
+    y,
+    width,
+    height,
+    zIndex,
+    payload: { src, alt: '' },
+  };
+}
+
+export function makeShape(
+  fill = '#eceaff',
+  x = 240,
+  y = 500,
+  width = 360,
+  height = 180,
+  zIndex = 1,
+): DeckElement {
+  return {
+    id: uid('el'),
+    type: 'shape',
+    x,
+    y,
+    width,
+    height,
+    zIndex,
+    payload: { fill, radius: 24 },
+  };
+}
+
+export function makeText(
+  text: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  zIndex = 1,
+): DeckElement {
+  return {
+    id: uid('el'),
+    type: 'text',
+    x,
+    y,
+    width,
+    height,
+    zIndex,
+    payload: {
+      richText: {
+        text,
+      },
+    },
+  };
+}
+
+export function makeChart(
+  spec: ChartSpec,
+  x = 920,
+  y = 240,
+  width = 560,
+  height = 430,
+  zIndex = 1,
+): DeckElement {
+  return {
+    id: uid('chart'),
+    type: 'chart',
+    x,
+    y,
+    width,
+    height,
+    zIndex,
+    payload: {
+      chart: spec,
+    },
+  };
+}
+
+export function makeTable(
+  spec: TableSpec,
+  x = 180,
+  y = 250,
+  width = 1240,
+  height = 360,
+  zIndex = 1,
+): DeckElement {
+  return {
+    id: uid('table'),
+    type: 'table',
+    x,
+    y,
+    width,
+    height,
+    zIndex,
+    payload: {
+      table: spec,
+    },
+  };
+}
+
+export function blankSlide(title = 'Untitled slide'): Slide {
+  const id = uid('slide');
+
+  return {
+    id,
+    title,
+    layout: 'blank',
+    background: '#ffffff',
+    speakerNotes: '',
+    elementIds: [],
+    elements: {},
+  };
+}
+
+export function demoDeck(): Deck {
+  const slide1 = blankSlide('Introduction');
+  const slide2 = blankSlide('Market Overview');
+  const slide3 = blankSlide('Strategy');
+
+  slide1.id = 'demo-slide-1';
+  slide2.id = 'demo-slide-2';
+  slide3.id = 'demo-slide-3';
+
+  const title = makeText(
+    'AI Presentation Builder',
+    140,
+    170,
+    1000,
+    130,
+    1,
+  );
+
+  const subtitle = makeText(
+    'Generate, edit and refine presentations with AI',
+    145,
+    330,
+    900,
+    90,
+    2,
+  );
+
+  title.id = 'demo-slide-1-element-1';
+  subtitle.id = 'demo-slide-1-element-2';
+
+  slide1.elements = {
+    [title.id]: title,
+    [subtitle.id]: subtitle,
+  };
+
+  slide1.elementIds = [title.id, subtitle.id];
+
+  const chart = makeChart(
+    {
+      type: 'bar',
+      title: 'Quarterly Growth',
+      categories: ['Q1', 'Q2', 'Q3', 'Q4'],
+      series: [
+        {
+          name: 'Revenue',
+          data: [25, 42, 58, 76],
+        },
+      ],
+    },
+    180,
+    220,
+    900,
+    500,
+    1,
+  );
+
+  chart.id = 'demo-slide-2-element-1';
+
+  slide2.elements = {
+    [chart.id]: chart,
+  };
+
+  slide2.elementIds = [chart.id];
+
+  const strategyTitle = makeText(
+    'Strategy',
+    140,
+    130,
+    700,
+    100,
+    1,
+  );
+
+  const table = makeTable(
+    {
+      headers: ['Initiative', 'Owner', 'Status'],
+      rows: [
+        ['AI generation', 'Product', 'In progress'],
+        ['Canvas editing', 'Engineering', 'In progress'],
+        ['Export', 'Engineering', 'Planned'],
+      ],
+    },
+    140,
+    280,
+    1200,
+    360,
+    2,
+  );
+
+  strategyTitle.id = 'demo-slide-3-element-1';
+  table.id = 'demo-slide-3-element-2';
+
+  slide3.elements = {
+    [strategyTitle.id]: strategyTitle,
+    [table.id]: table,
+  };
+
+  slide3.elementIds = [strategyTitle.id, table.id];
+
+  return {
+    id: 'demo-deck',
+    title: 'Untitled Presentation',
+    theme: {
+      name: 'Aurora',
+      accent: '#635BFF',
+    },
+    aspectRatio: '16:9',
+    slides: [slide1, slide2, slide3],
+  };
+}*{box-sizing:border-box}html,body{margin:0;height:100%;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f5f8;color:#17181c}button,input,textarea,select{font:inherit}button{border:0;background:none;cursor:pointer;color:inherit}.app{height:100vh;display:flex;flex-direction:column;overflow:hidden}.topbar{height:60px;display:flex;align-items:center;justify-content:space-between;padding:0 18px;border-bottom:1px solid #dddfe6;background:#fff}.brand{display:flex;align-items:center;gap:10px;width:230px}.logo{width:30px;height:30px;border-radius:8px;background:#18181b;color:#fff;display:grid;place-items:center;font-weight:800}.brand b{display:block;font-size:14px}.brand span{display:block;font-size:10px;color:#888}.deck-title{font-size:13px;font-weight:650;color:#4d4e56}.top-actions{display:flex;align-items:center;gap:6px;width:300px;justify-content:flex-end}.top-actions button,.canvas-toolbar button{height:32px;padding:0 10px;border:1px solid #dedfe5;border-radius:7px;background:#fff;display:flex;align-items:center;gap:6px;font-size:12px}.top-actions button:hover,.canvas-toolbar button:hover{background:#f6f6f8}.top-actions button:disabled{opacity:.35}.body{display:grid;grid-template-columns:190px minmax(480px,1fr) 220px 320px;min-height:0;flex:1}.filmstrip{background:#f9fafb;border-right:1px solid #dddfe6;padding:14px 10px;display:flex;flex-direction:column;min-height:0}.film-head{display:flex;justify-content:space-between;align-items:center;font-size:12px;font-weight:700;padding:0 5px 10px}.film-head button{width:25px;height:25px;border:1px solid #dddfe6;border-radius:6px;display:grid;place-items:center}.slides-list{overflow:auto;display:flex;flex-direction:column;gap:10px}.thumb-wrap{position:relative;padding:4px;border:1px solid transparent;border-radius:9px}.thumb-wrap.active{border-color:#635bff;background:#efefff}.thumb{aspect-ratio:16/9;background:#fff;border:1px solid #dddfe6;border-radius:6px;padding:8px;overflow:hidden;box-shadow:0 1px 2px #00000008}.thumb-title{font-size:7px;font-weight:800;margin-bottom:5px}.thumb-el{font-size:5px;color:#71737c;margin-top:3px;white-space:nowrap;overflow:hidden}.thumb-el.chart{height:25px;border:1px dashed #aaa;border-radius:3px;padding:5px}.thumb-el.table{height:18px;border:1px solid #ddd}.thumb-actions{display:flex;position:absolute;right:7px;bottom:7px;opacity:0;background:#fff;border:1px solid #dddfe6;border-radius:5px}.thumb-wrap:hover .thumb-actions{opacity:1}.thumb-actions button{padding:4px}.drop-hint{font-size:10px;color:#999;line-height:1.4;margin:10px 4px}.stage{display:flex;flex-direction:column;min-width:0;background:#eef0f4}.canvas-toolbar{height:44px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #dfe1e7}.canvas-toolbar span{font-size:12px;font-weight:700}.canvas-shell{flex:1;display:grid;place-items:center;overflow:auto;padding:30px}.canvas{position:relative;width:min(900px,100%);aspect-ratio:16/9;border:1px solid #d8d9e0;box-shadow:0 14px 45px #16182114;overflow:hidden}.element{position:absolute;overflow:visible;touch-action:none;user-select:none;border:1px solid transparent}.element.selected{border:1px solid #635bff;box-shadow:0 0 0 1px #635bff22}.element img{width:100%;height:100%;object-fit:cover;border-radius:inherit}.text-el{width:100%;height:100%;padding:10px 12px;white-space:pre-wrap;font-size:20px;line-height:1.28;overflow:hidden}.chart-title{position:absolute;top:0;left:0;width:100%;text-align:center;font-size:13px;font-weight:750;z-index:2;pointer-events:none}.element table{width:100%;height:100%;border-collapse:collapse;font-size:11px;background:#fff}.element th,.element td{border:1px solid #ddd;padding:8px;text-align:left}.element th{background:#f4f5f8}.shape{width:100%;height:100%}.delete-handle{position:absolute;right:-9px;top:-9px;width:20px;height:20px;border-radius:50%;background:#fff;border:1px solid #dddfe6;display:grid;place-items:center;z-index:10}.resize-handle{position:absolute;width:10px;height:10px;background:#fff;border:1px solid #635bff;right:-6px;bottom:-6px;cursor:nwse-resize;border-radius:2px}.canvas-status{height:30px;padding:0 14px;display:flex;align-items:center;font-size:10px;color:#858792}.inspector{background:#fff;border-right:1px solid #dddfe6;padding:14px;overflow:auto}.inspector.empty{font-size:11px;color:#999}.panel-title{font-size:12px;font-weight:800;margin-bottom:18px}.inspector label{display:block;font-size:10px;font-weight:700;color:#73747c;margin:14px 0 6px}.inspector input,.inspector textarea,.inspector select{width:100%;border:1px solid #dddfe6;border-radius:6px;background:#fff;padding:7px;font-size:11px;outline:none}.inspector textarea{min-height:110px;resize:vertical}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}.data-editor{font-family:ui-monospace,monospace;font-size:9px!important}.chat{background:#fff;display:flex;flex-direction:column;min-height:0}.chat-head{height:55px;border-bottom:1px solid #e1e2e8;padding:0 14px;display:flex;align-items:center;justify-content:space-between}.chat-head b{display:block;font-size:12px}.chat-head span{display:block;font-size:9px;color:#92939b;margin-top:2px}.messages{flex:1;overflow:auto;padding:14px}.welcome h3{font-size:16px;margin:10px 0}.welcome p{font-size:11px;line-height:1.5;color:#74757d}.chips{display:flex;flex-direction:column;gap:6px;margin-top:18px}.chips button{text-align:left;border:1px solid #dedfe6;border-radius:7px;padding:8px;font-size:10px;background:#fafafa}.chips button:hover{border-color:#bbb9ee}.msg{font-size:11px;line-height:1.45;margin-bottom:10px;display:flex}.msg>div{max-width:90%;padding:8px 10px;border-radius:9px}.msg.user{justify-content:flex-end}.msg.user>div{background:#17181c;color:#fff}.msg.assistant>div{background:#f0f1f5;color:#30313a;display:flex;align-items:center;gap:7px}.composer{border-top:1px solid #e1e2e8;padding:10px;display:flex;gap:7px}.composer textarea{flex:1;height:58px;resize:none;border:1px solid #dddfe6;border-radius:8px;padding:8px;font-size:11px;outline:none}.composer button{width:34px;height:34px;align-self:flex-end;border-radius:7px;background:#17181c;color:#fff;display:grid;place-items:center}.composer button:disabled{opacity:.35}.spin{animation:spin 1s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}
+@media(max-width:1100px){.body{grid-template-columns:160px minmax(420px,1fr) 200px}.chat{position:fixed;right:0;top:60px;bottom:0;width:320px;box-shadow:-10px 0 30px #0001}.top-actions{width:auto}.brand{width:auto}.deck-title{display:none}}
+@media print{.topbar,.filmstrip,.inspector,.chat,.canvas-toolbar,.canvas-status,.body{display:none!important}.print-deck{display:block!important}.print-slide{position:relative;width:100vw;aspect-ratio:16/9;page-break-after:always;overflow:hidden}.print-el{position:absolute}.app{height:auto;overflow:visible}}
+.top-actions{width:auto;flex-wrap:wrap}
+.guide.x{position:absolute;top:0;bottom:0;width:1px;background:#ff4d6d;pointer-events:none;z-index:50}
+.guide.y{position:absolute;left:0;right:0;height:1px;background:#ff4d6d;pointer-events:none;z-index:50}
+.marquee{position:absolute;border:1px dashed #635bff;background:#635bff22;pointer-events:none;z-index:40}
+.thumb-wrap.drop-target{outline:2px solid #635bff;background:#ecebff}
+.thumb-wrap.dragging{opacity:.5}
+.insert-line{height:3px;background:#635bff;border-radius:2px;margin:2px 4px}
+.el-tools{position:absolute;left:0;top:-30px;display:flex;gap:2px;background:#fff;border:1px solid #dddfe6;border-radius:6px;z-index:20}
+.el-tools button{width:22px;height:22px;display:grid;place-items:center}
+.element table input{width:100%;border:0;background:transparent;padding:0;font:inherit}
+.thumb-title-input{width:100%;border:0;font-size:8px;font-weight:800;background:transparent;margin-bottom:4px}
+.add-end{margin:8px 4px 0;border:1px dashed #ccc;border-radius:7px;padding:8px;font-size:11px;background:#fff}
+.print-deck{display:none}
+.empty-deck{height:100vh;display:grid;place-items:center}
+.inspector-actions{display:flex;gap:8px;margin-top:16px}
+.inspector-actions button{border:1px solid #dddfe6;border-radius:6px;padding:6px 10px;background:#fff}
+.inspector-error{color:#b42318;font-size:11px;margin-top:8px}
+.text-el[contenteditable='true']{outline:1px solid #635bff;background:#fff}
+.element-drop-target {
+    outline: 3px solid #6d5dfc;
+    outline-offset: 4px;
+    transform: scale(1.02);
+  }
+  
+  .thumb-wrap {
+    transition:
+      outline 120ms ease,
+      transform 120ms ease,
+      background 120ms ease;
+  }
+  
+  .element {
+    touch-action: none;
+    user-select: none;
+    cursor: grab;
+  }
+  
+  .element:active {
+    cursor: grabbing;
+  }

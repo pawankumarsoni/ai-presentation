@@ -1,5 +1,3 @@
-'use client';
-
 import { create } from 'zustand';
 import {
   Deck,
@@ -270,48 +268,54 @@ export const useDeckStore = create<Store>((set, get) => ({
       if (created.length) set({ selectedElementIds: created });
     }),
 
-    moveElement: (from, to, id, x = 100, y = 100) =>
+    moveElement: (from, to, id, x = 100, y = 100, opts) => {
+      let createdId: string | null = null;
+
       get().apply((d) => {
-        const source = d.slides.find(
-          (slide) => slide.id === from
-        );
-    
-        const destination = d.slides.find(
-          (slide) => slide.id === to
-        );
-    
-        if (
-          !source ||
-          !destination ||
-          !source.elements[id]
-        ) {
+        const source = d.slides.find((slide) => slide.id === from);
+        const destination = d.slides.find((slide) => slide.id === to);
+        if (!source || !destination) return;
+
+        const sourceElement = source.elements[id];
+        if (!sourceElement) return;
+
+        if (opts?.copy) {
+          const copy = structuredClone(sourceElement);
+          copy.id = uid('el');
+          createdId = copy.id;
+          placeOnSlide(destination, copy, x, y);
+          destination.elements[copy.id] = copy;
+          destination.elementIds.push(copy.id);
+          syncZ(destination);
           return;
         }
-    
-        const element = source.elements[id];
-    
-        delete source.elements[id];
-    
-        source.elementIds = source.elementIds.filter(
-          (elementId) => elementId !== id
-        );
-    
-        element.x = Math.max(
-          0,
-          Math.min(W - element.width, x)
-        );
-    
-        element.y = Math.max(
-          0,
-          Math.min(H - element.height, y)
-        );
-    
-        destination.elements[id] = element;
-    
-        if (!destination.elementIds.includes(id)) {
-          destination.elementIds.push(id);
+
+        if (source.id === destination.id) {
+          const position = findFreePosition(
+            {
+              elementIds: destination.elementIds.filter((elementId) => elementId !== id),
+              elements: destination.elements,
+            },
+            sourceElement,
+            x,
+            y,
+          );
+          sourceElement.x = position.x;
+          sourceElement.y = position.y;
+          return;
         }
-      }),
+
+        delete source.elements[id];
+        source.elementIds = source.elementIds.filter((elementId) => elementId !== id);
+        placeOnSlide(destination, sourceElement, x, y);
+        destination.elements[id] = sourceElement;
+        if (!destination.elementIds.includes(id)) destination.elementIds.push(id);
+        syncZ(source);
+        syncZ(destination);
+      }, opts);
+
+      if (createdId) set({ selectedElementIds: [createdId] });
+    },
 
   bringForward: (slideId, id) =>
     get().apply((d) => {

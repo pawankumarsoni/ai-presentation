@@ -12,7 +12,6 @@ type Props = {
   onAdd: () => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
-  onDropElement: (id: string) => void;
 };
 
 export function Filmstrip({
@@ -23,7 +22,6 @@ export function Filmstrip({
   onAdd,
   onDuplicate,
   onDelete,
-  onDropElement,
 }: Props) {
   const [draggedSlide, setDraggedSlide] = useState<number | null>(
     null

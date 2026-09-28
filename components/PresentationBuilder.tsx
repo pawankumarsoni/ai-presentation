@@ -19,7 +19,10 @@ import { Undo2, Redo2, Download, Type, ImageIcon, BarChart3, Table2, Square } fr
 
 function isGeneratePrompt(prompt: string, userTurns: number) {
   if (userTurns === 0) return true;
-  return /\b(create|generate|make|build)\b.*\b(deck|presentation|slides?)\b/i.test(prompt);
+  return (
+    /\b(create|generate|make|build)\b[\s\S]{0,50}\b(deck|presentation)\b/i.test(prompt) ||
+    /\b(new|fresh)\s+(deck|presentation)\b/i.test(prompt)
+  );
 }
 
 async function readSse(
@@ -31,25 +34,34 @@ async function readSse(
     onEvent({ type: json.error ? 'error' : 'done', ...json });
     return;
   }
+
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
+
+  const consume = (part: string) => {
+    const line = part.split('\n').find((l) => l.startsWith('data: '));
+    if (!line) return;
+    try {
+      onEvent(JSON.parse(line.slice(6)));
+    } catch {
+      // Ignore malformed SSE frames.
+    }
+  };
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
+
     buf += decoder.decode(value, { stream: true });
     const parts = buf.split('\n\n');
     buf = parts.pop() || '';
-    for (const part of parts) {
-      const line = part.split('\n').find((l) => l.startsWith('data: '));
-      if (!line) continue;
-      try {
-        onEvent(JSON.parse(line.slice(6)));
-      } catch {
-        /* ignore malformed chunk */
-      }
-    }
+
+    for (const part of parts) consume(part);
   }
+
+  buf += decoder.decode();
+  if (buf.trim()) consume(buf);
 }
 
 export function PresentationBuilder() {
@@ -105,42 +117,89 @@ export function PresentationBuilder() {
   }, [s, slide]);
 
   const ai = async (prompt: string) => {
-    s.addChat({ role: 'user', text: prompt });
     setBusy(true);
-    s.beginGesture();
+  
+    s.addChat({
+      role: 'user',
+      text: prompt,
+    });
+  
     try {
-      const userTurns = s.chat.filter((m) => m.role === 'user').length - 1;
-      const mode = isGeneratePrompt(prompt, userTurns) ? 'generate' : 'edit';
+      const currentDeck = useDeckStore.getState().deck;
+  
+      const hasContent = currentDeck.slides.some(
+        (slide) => slide.elementIds.length > 0,
+      );
+  
+      const mode = hasContent ? 'edit' : 'generate';
+  
       const r = await fetch('/api/ai', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+        },
         body: JSON.stringify({
-          deck: s.deck,
+          deck: currentDeck,
           prompt,
           mode,
-          history: s.chat,
         }),
       });
-      if (!r.ok && r.headers.get('content-type')?.includes('application/json')) {
-        const data = await r.json();
-        throw new Error(data.error || 'AI request failed');
-      }
-      let finalMessage = 'Updated the deck.';
-      let sawDeck = false;
-      await readSse(r, (data) => {
-        if (data.type === 'error') throw new Error(data.error);
-        if (data.deck) {
-          sawDeck = true;
-          s.loadDeck(data.deck, { recordHistory: false });
+  
+      if (!r.ok) {
+        let message = `AI request failed (${r.status})`;
+  
+        try {
+          const errorData = await r.json();
+          message = errorData.error || message;
+        } catch {
+          // Ignore JSON parse failure
         }
-        if (data.type === 'done') finalMessage = data.message || finalMessage;
+  
+        throw new Error(message);
+      }
+  
+      let latestDeck = currentDeck;
+      let finalMessage = 'Updated the deck.';
+  
+      await readSse(r, (payload) => {
+        // Every tool event contains the latest canonical deck.
+        if (payload.deck) {
+          latestDeck = payload.deck;
+        }
+  
+        // Final event contains the final canonical deck.
+        if (payload.type === 'done') {
+          if (payload.deck) {
+            latestDeck = payload.deck;
+          }
+  
+          if (payload.message) {
+            finalMessage = payload.message;
+          }
+        }
+  
+        if (payload.type === 'error') {
+          throw new Error(payload.error || 'AI request failed');
+        }
       });
-      if (!sawDeck && !r.ok) throw new Error('AI request failed');
-      s.endGesture();
-      s.addChat({ role: 'assistant', text: finalMessage });
+  
+      // IMPORTANT:
+      // Replace the frontend deck with the canonical backend deck.
+      if (latestDeck) {
+        s.loadDeck(latestDeck, {
+          recordHistory: true,
+        });
+      }
+  
+      s.addChat({
+        role: 'assistant',
+        text: finalMessage,
+      });
     } catch (e: any) {
-      s.cancelGesture();
-      s.addChat({ role: 'assistant', text: `AI error: ${e.message}` });
+      s.addChat({
+        role: 'assistant',
+        text: `AI error: ${e?.message || 'Unknown error'}`,
+      });
     } finally {
       setBusy(false);
     }
@@ -272,19 +331,6 @@ export function PresentationBuilder() {
           onAdd={() => s.addSlide()}
           onDuplicate={s.duplicateSlide}
           onDelete={s.deleteSlide}
-          onDropElement={(slideId) => {
-            const elementId = s.selectedElementIds[0];
-
-            if (!elementId || !slide) return;
-
-            s.moveElement(
-              slide.id,
-              slideId,
-              elementId,
-              120,
-              120
-            );
-          }}
         />
 
         <Canvas

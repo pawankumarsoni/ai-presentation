@@ -6,7 +6,6 @@ import {
   makeChart,
   makeTable,
   makeText,
-  blankSlide,
 } from "@/types/deck";
 
 /**
@@ -770,15 +769,45 @@ export function applyTool(
   switch (name) {
     case "plan_deck": {
       deck.title = args.title || deck.title;
-      deck.slides = (args.slides || []).map((planned: { title: string; layout?: string; purpose?: string }) => {
-        const slide = blankSlide(planned.title);
-        slide.layout = (planned.layout as typeof slide.layout) || "content";
-        slide.speakerNotes = planned.purpose || "";
-        return slide;
-      });
+    
+      const plannedSlides = Array.isArray(args.slides)
+        ? args.slides
+        : [];
+    
+      deck.slides = plannedSlides.map(
+        (
+          planned: {
+            title?: string;
+            layout?: string;
+            purpose?: string;
+          },
+          index: number,
+        ) => ({
+          id: uid("slide"),
+          title: planned.title || `Slide ${index + 1}`,
+          layout: planned.layout || "content",
+          background: "#ffffff",
+          speakerNotes: planned.purpose || "",
+          elementIds: [],
+          elements: {},
+        }),
+      );
+    
+      // Safety fallback
       if (deck.slides.length === 0) {
-        deck.slides = [blankSlide("Untitled slide")];
+        deck.slides = [
+          {
+            id: uid("slide"),
+            title: "Untitled slide",
+            layout: "blank",
+            background: "#ffffff",
+            speakerNotes: "",
+            elementIds: [],
+            elements: {},
+          },
+        ];
       }
+    
       return {
         planned: true,
         title: deck.title,
