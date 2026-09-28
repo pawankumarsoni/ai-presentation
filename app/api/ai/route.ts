@@ -428,7 +428,7 @@ ${
                 };
               }
 
-              if (toolName === "plan_deck" && result?.success) {
+              if (toolName === "plan_deck" && result?.planned === true) {
                 planned = true;
               }
 
